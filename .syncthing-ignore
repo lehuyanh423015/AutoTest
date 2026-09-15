@@ -1,0 +1,16 @@
+.venv
+.git
+__pycache__
+.pytest_cache
+.ruff_cache
+
+*.pyc
+*.pyo
+
+.coverage
+coverage.json
+htmlcov
+
+logs
+temp
+workspace

@@ -1,0 +1,32 @@
+[project]
+name = "autotest"
+version = "0.1.0"
+description = "LLM-based automatic unit test generation system"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "psutil==7.2.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.4.2",
+    "pytest-cov==7.1.0",
+    "coverage==7.16.0",
+    "pytest-timeout==2.4.0",
+    "ruff==0.16.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.uv]
+exclude-newer = "2026-09-15T00:00:00Z"
