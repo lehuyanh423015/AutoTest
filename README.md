@@ -1,13 +1,15 @@
-# AutoTest — Phase 2 execution feedback
+# AutoTest — Phase 3 coverage-guided test generation
 
 AutoTest is a research prototype that asks a local large language model to generate pytest
-tests for a selected Python function. Phase 2 adds a bounded execution-feedback loop to the
-frozen Phase 1.1 pipeline:
+tests for a selected Python function. Phase 3 extends the frozen execution/repair pipeline with
+target-function coverage feedback:
 
 ```text
 standalone .py file -> AST analysis -> deterministic prompt -> Ollama
                     -> generated test file -> pytest subprocess -> PASS?
                     -> failure analysis -> repair prompt -> bounded retry
+                    -> line/branch coverage baseline -> target reached?
+                    -> additional test -> cumulative execution/repair -> coverage comparison
 ```
 
 The current scope is one standalone Python file and one named top-level function at a time.
@@ -27,7 +29,10 @@ process with a configurable timeout.
 - `test_quality.py` records structural metrics and flags obvious oracle degradation patterns.
 - `repair_engine.py` owns the provider-neutral, iterative, bounded repair loop.
 - `test_runner.py` invokes the current interpreter's pytest in a timed subprocess.
-- `main.py` connects the components and prints PASS, FAIL, ERROR, or TIMEOUT details.
+- `coverage_runner.py` invokes coverage.py in subprocesses and normalizes only the selected
+  function's lines and branch arcs.
+- `coverage_engine.py` owns the bounded, transactional supplementary-test loop.
+- `main.py` connects the components and reports execution and coverage outcomes separately.
 
 The pytest subprocess runs in the controlled generated-test directory and uses that directory as
 its explicit pytest root. The target file's parent directory is prepended to `PYTHONPATH` in the
@@ -62,32 +67,67 @@ ollama pull qwen2.5-coder:14b
 If Ollama already runs as a Windows service, a separate `ollama serve` process is unnecessary.
 The default endpoint is `http://localhost:11434`.
 
-## Run the Phase 2 CLI
+## Run the Phase 3 CLI
 
 From the repository root:
 
 ```powershell
 uv run python -m autotest.main `
-    --file tests/fixtures/sample_project/calculator.py `
-    --function divide `
-    --max-repair-attempts 3
+    --file tests/fixtures/sample_project/branching.py `
+    --function classify_number `
+    --max-repair-attempts 3 `
+    --max-coverage-rounds 3 `
+    --coverage-target 100
 ```
 
 Useful options include `--model`, `--ollama-url`, `--output-dir`, `--timeout`,
-`--ollama-timeout`, `--temperature`, and `--max-repair-attempts`. The repair limit defaults to `3`,
-meaning one initial execution plus at most three repaired executions. A value of `0` disables
-repair and reproduces the direct Phase 1 generation/execution behavior:
+`--ollama-timeout`, `--temperature`, `--max-repair-attempts`, `--max-coverage-rounds`, and
+`--coverage-target`. Both bounded-loop limits default to `3`; the coverage target defaults to
+`100`. A repair limit of `0` reproduces direct Phase 1 generation/execution. A coverage-round
+limit of `0` still measures the baseline but makes no coverage-generation request:
 
 ```powershell
 uv run python -m autotest.main `
     --file tests/fixtures/sample_project/calculator.py `
     --function divide `
-    --max-repair-attempts 0
+    --max-repair-attempts 0 `
+    --max-coverage-rounds 0
 ```
 
-`--output-dir` selects the run-artifact root and defaults to `workspace/runs/`, which is ignored by
-Git. The report includes initial and final statuses, repair progress, repairs used, stop reason,
-generated path, duration, and captured pytest output.
+`--max-coverage-rounds` must be non-negative. `--coverage-target` must be from 0 through 100 and
+applies to line coverage and branch coverage when branches exist. `--output-dir` selects the
+immutable artifact root and defaults to `workspace/runs/`, which is ignored by Git.
+
+## Coverage guidance and acceptance
+
+Coverage begins only after Phase 2 has produced a passing suite. Round 0 measures its baseline
+with `python -m coverage run --branch -m pytest`, followed by the pinned coverage.py JSON command.
+Both commands use the current Python interpreter, a subprocess-only `PYTHONPATH` and
+`COVERAGE_FILE`, and a controlled artifact directory. AutoTest never imports or evaluates target
+code itself.
+
+The analyzer's AST-derived start/end lines define the target function range, including decorators
+when present. Executable and missing lines come from coverage.py and are filtered to that range;
+physical source lines are not guessed to be executable. Branch arcs are filtered when their
+origin line belongs to the function. Destinations, including negative coverage.py sentinel values,
+are preserved. A function with no measurable arcs reports branch coverage as N/A, which satisfies
+the branch side of target-reached logic. Other functions in the module cannot lower the selected
+function's percentage.
+
+Each feedback round receives actual line-numbered target source, current percentages, missing
+lines/arcs, and bounded accepted-test context. It must return one supplementary pytest module.
+Accepted files are immutable: AutoTest executes all prior files plus the candidate, and Phase 2
+repair may modify only that candidate. A passing candidate is accepted only if target coverage
+improves without regression. A non-improving or regressing candidate remains preserved for
+analysis but does not enter the final suite.
+
+Coverage stops at `TARGET_REACHED`, `MAX_ROUNDS_REACHED`, `NO_COVERAGE_IMPROVEMENT`,
+`COVERAGE_REGRESSION`, `CANDIDATE_NOT_ACCEPTED`, `COVERAGE_ERROR`, `LLM_ERROR`, or
+`PIPELINE_ERROR`. All loops are finite; no limit is increased automatically.
+
+High coverage does not prove that a test suite is correct or effective at detecting faults.
+
+Coverage feedback complements execution feedback; it does not replace it.
 
 ## Repair policy
 
@@ -108,8 +148,8 @@ test oracle is correct or that the target program is defect-free.
 
 ## Run artifacts
 
-Every successful generation gets a collision-resistant UTC run directory and does not overwrite
-an earlier run:
+Every successful generation gets a collision-resistant UTC run directory. Phase 3 adds a coverage
+subtree without changing the Phase 2 attempt layout:
 
 ```text
 workspace/runs/<UTC-timestamp>-<random-id>/
@@ -121,8 +161,20 @@ workspace/runs/<UTC-timestamp>-<random-id>/
 │   ├── stdout.txt
 │   ├── stderr.txt
 │   └── result.json
-└── attempt-001/
-    └── ...
+└── coverage/
+    ├── baseline/
+    │   ├── coverage_raw.json
+    │   ├── coverage_result.json
+    │   ├── stdout.txt
+    │   └── stderr.txt
+    └── round-001/
+        ├── prompt.txt
+        ├── raw_response.txt
+        ├── generated_test.py
+        ├── coverage_raw.json
+        ├── coverage_result.json
+        ├── result.json
+        └── candidate/attempt-000/...
 ```
 
 Attempt 0 is always the initial generation; later attempts are repairs. Files use exclusive UTF-8
@@ -130,8 +182,10 @@ writes, so completed attempts are never overwritten. Every attempt records execu
 status, timing, failure category, test/assert counts, quality warnings, and prompt/test SHA-256
 hashes. Exact prompts and pre-sanitization model responses are retained. Root `result.json`
 summarizes initial/final status, attempt history, repair count and success, stop reason, aggregate
-generation/execution time, effective Ollama configuration, and the source hash. Phase 1 root fields
-remain present where applicable, but their artifact paths now point into `attempt-000/`.
+generation/execution time, effective Ollama configuration, and the source hash. Phase 3 adds
+initial/final coverage, missing lines/arcs, accepted history, gain, stop state, generation/repair
+call counts, and aggregate measurement timing. Large raw reports remain separate. All writes are
+exclusive UTF-8 writes, and temporary coverage databases are removed from artifact directories.
 
 Feedback sent to the LLM is limited to 12,000 characters by default. When necessary, AutoTest
 retains the end of pytest output because it typically contains the failed assertion and exception
@@ -150,7 +204,9 @@ Execution statuses have these stable meanings:
 
 CLI process exit codes are `0` for PASS, `1` for FAIL, `2` for ERROR or an
 analysis/generation/artifact pipeline error, and `3` for TIMEOUT. Expected errors are concise;
-`--debug` enables tracebacks for diagnosis.
+`--debug` enables tracebacks for diagnosis. Failing to reach the requested coverage target does
+not turn a passing suite into FAIL and does not introduce a new exit code. A genuine coverage
+infrastructure failure uses the existing pipeline-error exit code 2.
 
 The effective research baseline is model `qwen2.5-coder:14b`, Ollama URL
 `http://localhost:11434`, HTTP timeout 120 seconds, and temperature `0.0`. These controls reduce
@@ -166,7 +222,8 @@ uv run ruff format --check .
 uv run ruff check .
 ```
 
-Run the opt-in live smoke test only when Ollama and the model are available:
+Run the opt-in live generation, repair, and coverage tests only when Ollama and the model are
+available:
 
 ```powershell
 $env:AUTOTEST_RUN_OLLAMA = "1"
@@ -175,11 +232,11 @@ uv run pytest -m ollama tests/test_ollama_integration.py -v
 
 ## Current limitations
 
-Phase 2 supports a single Python file, a single top-level function, pytest generation through local
-Ollama, subprocess execution, and bounded generated-test repair. It does not prepare arbitrary
-repository dependencies, analyze methods or cross-file context, verify test oracles against an
-external specification, guide generation with coverage, run mutation testing, or provide
-OS/container sandboxing. It never repairs or modifies target source code.
+Phase 3 supports one standalone Python file and one top-level sync or async function. It does not
+prepare arbitrary repository dependencies, analyze methods or cross-file context, verify test
+oracles against an external specification, perform semantic branch interpretation, run mutation
+testing, or provide OS/container sandboxing. Accepted-test prompt context is character-bounded,
+not repository-scale context selection. AutoTest never repairs or modifies target source code.
 
 Generated tests are untrusted code. The timeout and separate process are basic safety boundaries,
 not a security sandbox. **Subprocess isolation is NOT a security sandbox.** Run AutoTest only in a

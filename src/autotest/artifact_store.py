@@ -17,6 +17,7 @@ from autotest.test_generator import GeneratedTest
 from autotest.test_runner import TestRunResult
 
 if TYPE_CHECKING:
+    from autotest.coverage_engine import CoverageRoundResult, CoverageSessionResult
     from autotest.repair_engine import RepairSessionResult, TestAttempt
 
 _RUN_ID_PATTERN = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{6}")
@@ -46,6 +47,18 @@ class AttemptArtifacts:
     generated_test_file: Path
     stdout_file: Path
     stderr_file: Path
+    result_file: Path
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageRoundArtifacts:
+    """Immutable locations for one coverage-guided candidate round."""
+
+    round_index: int
+    round_dir: Path
+    prompt_file: Path
+    raw_response_file: Path
+    generated_test_file: Path
     result_file: Path
 
 
@@ -139,6 +152,149 @@ class ArtifactStore:
             result_file=attempt_dir / "result.json",
         )
 
+    def create_coverage_baseline(self, run: RunArtifacts) -> Path:
+        """Reserve the coverage baseline directory without touching Phase 2 attempts."""
+        coverage_dir = run.run_dir / "coverage"
+        baseline_dir = coverage_dir / "baseline"
+        try:
+            coverage_dir.mkdir(exist_ok=True)
+            baseline_dir.mkdir(exist_ok=False)
+        except FileExistsError as exc:
+            raise ArtifactError(
+                f"Refusing to overwrite coverage baseline directory: {baseline_dir}"
+            ) from exc
+        except OSError as exc:
+            raise ArtifactError(f"Could not create coverage baseline directory: {exc}") from exc
+        return baseline_dir
+
+    def create_coverage_round(self, run: RunArtifacts, round_index: int) -> CoverageRoundArtifacts:
+        """Reserve one deterministic supplementary-test proposal directory."""
+        if round_index < 1:
+            raise ArtifactError("Coverage round index must be greater than or equal to one.")
+        coverage_dir = run.run_dir / "coverage"
+        round_dir = coverage_dir / f"round-{round_index:03d}"
+        try:
+            coverage_dir.mkdir(exist_ok=True)
+            round_dir.mkdir(exist_ok=False)
+        except FileExistsError as exc:
+            raise ArtifactError(f"Refusing to overwrite coverage round: {round_dir}") from exc
+        except OSError as exc:
+            raise ArtifactError(f"Could not create coverage round: {exc}") from exc
+        return CoverageRoundArtifacts(
+            round_index=round_index,
+            round_dir=round_dir,
+            prompt_file=round_dir / "prompt.txt",
+            raw_response_file=round_dir / "raw_response.txt",
+            generated_test_file=round_dir / "generated_test.py",
+            result_file=round_dir / "result.json",
+        )
+
+    def save_coverage_prompt(self, artifacts: CoverageRoundArtifacts, prompt: str) -> None:
+        self._write_new_text(artifacts.prompt_file, prompt)
+
+    def save_coverage_response(self, artifacts: CoverageRoundArtifacts, response: str) -> None:
+        self._write_new_text(artifacts.raw_response_file, response)
+
+    def save_coverage_candidate(self, artifacts: CoverageRoundArtifacts, code: str) -> Path:
+        self._write_new_text(artifacts.generated_test_file, code)
+        return artifacts.generated_test_file
+
+    def create_nested_run(
+        self, run: RunArtifacts, parent: Path, name: str = "candidate"
+    ) -> RunArtifacts:
+        """Reserve a scoped Phase 2 attempt container for a coverage candidate."""
+        directory = parent / name
+        try:
+            directory.mkdir(exist_ok=False)
+        except FileExistsError as exc:
+            raise ArtifactError(f"Refusing to overwrite nested run directory: {directory}") from exc
+        except OSError as exc:
+            raise ArtifactError(f"Could not create nested run directory: {exc}") from exc
+        return RunArtifacts(
+            run_id=run.run_id,
+            timestamp_utc=run.timestamp_utc,
+            run_dir=directory,
+            prompt_file=directory / "prompt.txt",
+            raw_response_file=directory / "raw_response.txt",
+            generated_test_file=directory / "generated_test.py",
+            result_file=directory / "result.json",
+        )
+
+    def save_coverage_round_result(
+        self, artifacts: CoverageRoundArtifacts, round_result: CoverageRoundResult
+    ) -> dict[str, Any]:
+        """Persist compact round evidence while raw reports remain separate."""
+        before = round_result.coverage_before
+        after = round_result.coverage_after
+        candidate = round_result.candidate_test
+        repair_session = round_result.candidate_execution
+        metadata: dict[str, Any] = {
+            "round_index": round_result.round_index,
+            "accepted": round_result.accepted,
+            "stop_reason": (
+                round_result.stop_reason.value if round_result.stop_reason is not None else None
+            ),
+            "coverage_before": self._coverage_summary(before),
+            "coverage_after": self._coverage_summary(after) if after is not None else None,
+            "coverage_delta": {
+                "line_percent": round_result.line_coverage_delta,
+                "branch_percent": round_result.branch_coverage_delta,
+            },
+            "generation": {
+                "duration_seconds": round_result.generation_duration_seconds,
+                "test_function_count": (
+                    round_result.structure.test_function_count
+                    if round_result.structure is not None
+                    else 0
+                ),
+                "assert_count": (
+                    round_result.structure.assert_count if round_result.structure is not None else 0
+                ),
+                "quality_warnings": list(round_result.quality_warnings),
+            },
+            "candidate_execution": (
+                {
+                    "initial_status": repair_session.initial_status.value,
+                    "final_status": repair_session.final_status.value,
+                    "attempt_count": len(repair_session.attempts),
+                    "repair_count": repair_session.repair_count,
+                    "stop_reason": repair_session.stopped_reason.value,
+                    "final_test_file": str(repair_session.attempts[-1].test_file),
+                }
+                if repair_session is not None
+                else None
+            ),
+            "files": {
+                "prompt": artifacts.prompt_file.name,
+                "raw_response": (
+                    artifacts.raw_response_file.name
+                    if artifacts.raw_response_file.exists()
+                    else None
+                ),
+                "generated_test": (
+                    artifacts.generated_test_file.name
+                    if artifacts.generated_test_file.exists()
+                    else None
+                ),
+                "candidate_final_test": (
+                    str(candidate.test_file) if candidate is not None else None
+                ),
+            },
+            "hashes": {
+                "prompt_sha256": self._sha256(artifacts.prompt_file),
+                "generated_test_sha256": (
+                    self._sha256(artifacts.generated_test_file)
+                    if artifacts.generated_test_file.exists()
+                    else None
+                ),
+            },
+        }
+        self._write_new_text(
+            artifacts.result_file,
+            f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n",
+        )
+        return metadata
+
     def save_attempt_prompt(self, attempt: AttemptArtifacts, prompt: str) -> None:
         """Persist the exact prompt before invoking the provider."""
         self._write_new_text(attempt.prompt_file, prompt)
@@ -214,6 +370,9 @@ class ArtifactStore:
         temperature: float,
         max_repair_attempts: int,
         execution_timeout_seconds: float,
+        coverage_session: CoverageSessionResult | None = None,
+        max_coverage_rounds: int | None = None,
+        coverage_target: float | None = None,
     ) -> dict[str, Any]:
         """Persist the root summary for a complete bounded repair session."""
         initial_attempt = session.attempts[0]
@@ -274,11 +433,121 @@ class ArtifactStore:
                 for item in session.attempts
             ],
         }
+        if max_coverage_rounds is not None and coverage_target is not None:
+            metadata["coverage"] = self._coverage_session_metadata(
+                session,
+                coverage_session,
+                max_coverage_rounds=max_coverage_rounds,
+                coverage_target=coverage_target,
+            )
         self._write_new_text(
             run.result_file,
             f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n",
         )
         return metadata
+
+    def _coverage_session_metadata(
+        self,
+        repair_session: RepairSessionResult,
+        coverage_session: CoverageSessionResult | None,
+        *,
+        max_coverage_rounds: int,
+        coverage_target: float,
+    ) -> dict[str, Any]:
+        if coverage_session is None:
+            return {
+                "enabled": True,
+                "target": coverage_target,
+                "max_rounds": max_coverage_rounds,
+                "rounds_used": 0,
+                "target_reached": False,
+                "stop_reason": None,
+                "skipped_reason": "EXECUTION_NOT_PASSING",
+            }
+        initial = coverage_session.initial_coverage
+        final = coverage_session.final_coverage
+        accepted_rounds = sum(item.accepted for item in coverage_session.rounds)
+        phase2_repairs = repair_session.repair_count
+        candidate_repairs = sum(
+            item.candidate_execution.repair_count
+            for item in coverage_session.rounds
+            if item.candidate_execution is not None
+        )
+        coverage_generation_calls = len(coverage_session.rounds)
+        return {
+            "enabled": True,
+            "target": coverage_target,
+            "max_rounds": max_coverage_rounds,
+            "rounds_used": len(coverage_session.rounds),
+            "accepted_rounds": accepted_rounds,
+            "target_reached": coverage_session.target_reached,
+            "stop_reason": coverage_session.stop_reason.value,
+            "initial": self._coverage_summary(initial) if initial is not None else None,
+            "final": self._coverage_summary(final) if final is not None else None,
+            "history": [self._coverage_summary(item) for item in coverage_session.history],
+            "accepted_test_files": [str(path) for path in coverage_session.accepted_test_files],
+            "metrics": {
+                "initial_line_coverage": (
+                    initial.line_coverage_percent if initial is not None else None
+                ),
+                "final_line_coverage": final.line_coverage_percent if final is not None else None,
+                "line_coverage_gain": (
+                    final.line_coverage_percent - initial.line_coverage_percent
+                    if initial is not None and final is not None
+                    else None
+                ),
+                "initial_branch_coverage": (
+                    initial.branch_coverage_percent if initial is not None else None
+                ),
+                "final_branch_coverage": (
+                    final.branch_coverage_percent if final is not None else None
+                ),
+                "branch_coverage_gain": (
+                    final.branch_coverage_percent - initial.branch_coverage_percent
+                    if initial is not None
+                    and final is not None
+                    and initial.branch_coverage_percent is not None
+                    and final.branch_coverage_percent is not None
+                    else None
+                ),
+                "coverage_round_count": len(coverage_session.rounds),
+                "accepted_coverage_round_count": accepted_rounds,
+                "coverage_target_reached": coverage_session.target_reached,
+                "initial_generation_calls": 1,
+                "repair_calls": phase2_repairs,
+                "coverage_generation_calls": coverage_generation_calls,
+                "coverage_candidate_repair_calls": candidate_repairs,
+                "total_generation_count": (
+                    1 + phase2_repairs + coverage_generation_calls + candidate_repairs
+                ),
+                "total_repair_count": phase2_repairs + candidate_repairs,
+                "total_generation_time": (
+                    repair_session.total_generation_seconds
+                    + sum(item.total_generation_seconds for item in coverage_session.rounds)
+                ),
+                "total_execution_time": (
+                    repair_session.total_execution_seconds
+                    + sum(item.total_execution_seconds for item in coverage_session.rounds)
+                ),
+                "total_coverage_measurement_time": sum(
+                    item.duration_seconds
+                    for item in (
+                        [coverage_session.initial_coverage]
+                        + [round_result.coverage_after for round_result in coverage_session.rounds]
+                    )
+                    if item is not None
+                ),
+            },
+        }
+
+    @staticmethod
+    def _coverage_summary(result: Any) -> dict[str, Any]:
+        return {
+            "line_percent": result.line_coverage_percent,
+            "branch_percent": result.branch_coverage_percent,
+            "missing_lines": list(result.missing_lines),
+            "missing_branches": [list(arc) for arc in result.missing_branches],
+        }
 
     def save_result(
         self,

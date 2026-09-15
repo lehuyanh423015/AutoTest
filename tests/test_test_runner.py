@@ -1,8 +1,12 @@
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
+import pytest
+
+from autotest.errors import TestExecutionError as ExecutionError
 from autotest.test_runner import TestRunner as Runner
 from autotest.test_runner import TestStatus as RunStatus
 
@@ -130,3 +134,25 @@ def test_existing_pythonpath_is_preserved_without_global_mutation(tmp_path: Path
         assert os.environ["PYTHONPATH"] == existing
 
     assert child_pythonpath == os.pathsep.join((str(project_root.resolve()), existing))
+
+
+def test_run_suite_executes_cumulative_files_with_duplicate_basenames(tmp_path: Path) -> None:
+    first = tmp_path / "round one" / "generated_test.py"
+    second = tmp_path / "round two" / "generated_test.py"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    write_test(first, "def test_first():\n    assert 1 + 1 == 2\n")
+    write_test(second, "def test_second():\n    assert 2 + 2 == 4\n")
+
+    result = Runner(timeout=10).run_suite([first, second], project_root=tmp_path)
+
+    assert result.status is RunStatus.PASS
+    assert result.test_file == second.resolve()
+    assert "2 passed" in result.stdout
+
+
+def test_run_suite_requires_at_least_one_file(tmp_path: Path) -> None:
+    empty: Sequence[Path] = ()
+
+    with pytest.raises(ExecutionError, match="At least one"):
+        Runner().run_suite(empty, project_root=tmp_path)

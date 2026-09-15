@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -47,10 +48,23 @@ class TestRunner:
         self.timeout = timeout
 
     def run(self, test_file: Path | str, project_root: Path | str) -> TestRunResult:
-        test_path = Path(test_file).resolve()
+        """Run one test file using the frozen Phase 2 interface."""
+        return self.run_suite((test_file,), project_root)
+
+    def run_suite(
+        self,
+        test_files: Sequence[Path | str],
+        project_root: Path | str,
+    ) -> TestRunResult:
+        """Run a cumulative sequence of test files in one pytest subprocess."""
+        test_paths = tuple(Path(test_file).resolve() for test_file in test_files)
+        if not test_paths:
+            raise TestExecutionError("At least one generated test file is required.")
+        test_path = test_paths[-1]
         root = Path(project_root).resolve()
-        if not test_path.is_file():
-            raise TestExecutionError(f"Generated test file does not exist: {test_path}")
+        missing = next((path for path in test_paths if not path.is_file()), None)
+        if missing is not None:
+            raise TestExecutionError(f"Generated test file does not exist: {missing}")
         if not root.is_dir():
             raise TestExecutionError(f"Target project directory does not exist: {root}")
 
@@ -68,7 +82,8 @@ class TestRunner:
             "pytest",
             "--rootdir",
             str(test_path.parent),
-            str(test_path),
+            "--import-mode=importlib",
+            *(str(path) for path in test_paths),
             "-q",
             "-p",
             "no:cacheprovider",

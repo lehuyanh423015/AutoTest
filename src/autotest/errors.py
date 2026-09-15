@@ -35,3 +35,7 @@ class ArtifactError(AutoTestError):
 
 class TestExecutionError(AutoTestError):
     """Raised when test execution cannot be configured safely."""
+
+
+class CoverageError(AutoTestError):
+    """Raised when coverage execution or report parsing cannot complete safely."""

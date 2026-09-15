@@ -3,6 +3,8 @@ from unittest.mock import patch
 
 import pytest
 
+from autotest.coverage_engine import CoverageSessionResult, CoverageStopReason
+from autotest.coverage_runner import CoverageResult
 from autotest.errors import AnalyzerError
 from autotest.failure_analyzer import FailureAnalyzer
 from autotest.main import main
@@ -70,8 +72,24 @@ def run_mocked_cli(
 ) -> tuple[int, object]:
     source = tmp_path / "calculator.py"
     source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
-    with patch("autotest.main.RepairEngine") as engine_class:
+    coverage_result = CoverageResult(
+        source.resolve(), "add", (1, 2), (1, 2), (), (), (), 100.0, None, None, 0.1
+    )
+    coverage_session = CoverageSessionResult(
+        coverage_result,
+        coverage_result,
+        (),
+        (session.attempts[-1].test_file,),
+        (coverage_result,),
+        True,
+        CoverageStopReason.TARGET_REACHED,
+    )
+    with (
+        patch("autotest.main.RepairEngine") as engine_class,
+        patch("autotest.main.CoverageEngine") as coverage_engine_class,
+    ):
         engine_class.return_value.run.return_value = session
+        coverage_engine_class.return_value.run.return_value = coverage_session
         exit_code = main(
             [
                 "--file",
@@ -136,6 +154,45 @@ def test_cli_zero_repairs_is_passed_to_engine(tmp_path: Path) -> None:
 
     assert exit_code == 2
     assert engine_class.call_args.kwargs["max_repair_attempts"] == 0  # type: ignore[attr-defined]
+
+
+def test_cli_coverage_options_are_validated_and_reported(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, _ = run_mocked_cli(
+        tmp_path,
+        make_session(tmp_path, [RunStatus.PASS]),
+        "--max-coverage-rounds",
+        "0",
+        "--coverage-target",
+        "75.5",
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Coverage baseline: line 100.00%, branch N/A" in output
+    assert "Coverage target reached: YES" in output
+    result = next((tmp_path / "runs").iterdir()) / "result.json"
+    assert '"target": 75.5' in result.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--max-coverage-rounds", "-1"),
+        ("--coverage-target", "-0.1"),
+        ("--coverage-target", "100.1"),
+        ("--coverage-target", "nan"),
+    ],
+)
+def test_cli_rejects_invalid_coverage_options(tmp_path: Path, option: str, value: str) -> None:
+    source = tmp_path / "calculator.py"
+    source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--file", str(source), "--function", "add", option, value])
+
+    assert exc_info.value.code == 2
 
 
 def test_cli_rejects_negative_repair_count(tmp_path: Path) -> None:

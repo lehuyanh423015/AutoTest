@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -33,6 +34,12 @@ class TestExecutor(Protocol):
 
     def run(self, test_file: Path | str, project_root: Path | str) -> TestRunResult:
         """Execute one generated test artifact."""
+        ...
+
+    def run_suite(
+        self, test_files: Sequence[Path | str], project_root: Path | str
+    ) -> TestRunResult:
+        """Execute a cumulative generated-test suite."""
         ...
 
 
@@ -106,6 +113,7 @@ class RepairEngine:
         function: FunctionInfo,
         run: RunArtifacts,
         initial_test: GeneratedTest | None = None,
+        accepted_test_files: Sequence[Path | str] = (),
     ) -> RepairSessionResult:
         """Execute initial generation and at most the configured number of repairs."""
         attempts: list[TestAttempt] = []
@@ -120,6 +128,7 @@ class RepairEngine:
             prompt=initial_prompt,
             previous_code=None,
             supplied_generation=initial_test,
+            accepted_test_files=accepted_test_files,
         )
         attempts.append(initial)
         LOGGER.info("Initial execution completed with status %s", initial.run_result.status.value)
@@ -144,6 +153,7 @@ class RepairEngine:
                     kind=AttemptKind.REPAIR,
                     prompt=repair_prompt,
                     previous_code=previous.test_code,
+                    accepted_test_files=accepted_test_files,
                 )
             except (LLMError, GenerationError) as exc:
                 LOGGER.error("Repair generation stopped: %s", exc)
@@ -169,6 +179,7 @@ class RepairEngine:
         prompt: str,
         previous_code: str | None,
         supplied_generation: GeneratedTest | None = None,
+        accepted_test_files: Sequence[Path | str] = (),
     ) -> TestAttempt:
         artifacts = self.artifact_store.create_attempt(run, attempt_index)
         self.artifact_store.save_attempt_prompt(artifacts, prompt)
@@ -193,7 +204,12 @@ class RepairEngine:
         if not test_code:
             raise GenerationError("The LLM provider returned no test code.")
         test_file = self.artifact_store.save_attempt_test(artifacts, test_code)
-        run_result = self.runner.run(test_file, project_root=function.file_path.parent)
+        if accepted_test_files:
+            run_result = self.runner.run_suite(
+                (*accepted_test_files, test_file), project_root=function.file_path.parent
+            )
+        else:
+            run_result = self.runner.run(test_file, project_root=function.file_path.parent)
         failure_context = self.failure_analyzer.analyze(run_result)
         structure = analyze_test_structure(test_code)
         warnings = oracle_quality_warnings(previous_code, test_code)

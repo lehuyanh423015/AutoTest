@@ -1,5 +1,6 @@
 """Deterministic prompts for unit-test generation."""
 
+from autotest.coverage_runner import CoverageResult
 from autotest.failure_analyzer import FailureContext
 from autotest.project_analyzer import FunctionInfo
 from autotest.test_runner import TestStatus
@@ -78,6 +79,78 @@ Repair constraints:
 7. Do not replace assertions with tautologies such as assert True or result == result.
 8. Do not assert a value derived from the same invocation being tested.
 9. Do not copy observed output into an assertion unless target source logically justifies it.
+"""
+
+    def build_coverage(
+        self,
+        function: FunctionInfo,
+        coverage: CoverageResult,
+        accepted_test_sources: tuple[str, ...],
+        round_number: int,
+        *,
+        max_accepted_test_chars: int = 12_000,
+    ) -> str:
+        """Build deterministic feedback for one supplementary coverage test module."""
+        if round_number < 1:
+            raise ValueError("Coverage round number must be greater than or equal to one.")
+        if max_accepted_test_chars < 1:
+            raise ValueError("Accepted-test context limit must be greater than zero.")
+        numbered_source = "\n".join(
+            f"{line_number} | {line}"
+            for line_number, line in enumerate(
+                function.source_code.splitlines(), start=function.start_line
+            )
+        )
+        missing_lines = ", ".join(str(line) for line in coverage.missing_lines) or "None"
+        missing_branches = (
+            "\n".join(
+                f"{origin} -> {destination}" for origin, destination in coverage.missing_branches
+            )
+            or "None (branch coverage is not applicable or no branches are missing)"
+        )
+        accepted_context = "\n\n".join(
+            f"Accepted test module {index}:\n{source.rstrip()}"
+            for index, source in enumerate(accepted_test_sources, start=1)
+        )
+        if len(accepted_context) > max_accepted_test_chars:
+            marker = "\n[accepted-test context truncated at configured character limit]"
+            accepted_context = accepted_context[: max_accepted_test_chars - len(marker)] + marker
+        branch_percent = (
+            "N/A"
+            if coverage.branch_coverage_percent is None
+            else f"{coverage.branch_coverage_percent:.2f}%"
+        )
+        return f"""You are generating ADDITIONAL pytest tests for an existing passing test suite.
+
+Coverage round: {round_number}
+Target module: {function.module_name}
+Target function: {function.function_name}
+
+Target function source with actual source-file line numbers:
+{numbered_source}
+
+Current target-function coverage:
+Line coverage: {coverage.line_coverage_percent:.2f}%
+Branch coverage: {branch_percent}
+Missing executable lines: {missing_lines}
+Missing branch arcs:
+{missing_branches}
+
+Existing accepted tests (bounded context):
+{accepted_context or "None"}
+
+Requirements:
+1. Generate only new tests that focus specifically on the listed missing lines and branch arcs.
+2. Do not rewrite, reproduce, remove, weaken, or modify existing accepted tests.
+3. Import the target with: from {function.module_name} import {function.function_name}
+4. Use deterministic assertions whose expected values are logically supported by the source.
+5. Do not use observed runtime output as the oracle.
+6. Do not create tautological assertions, use assert True, or assert a value against itself.
+7. Do not use network access, external services, subprocesses, or install packages.
+8. Do not modify the target implementation.
+9. Do not intentionally sleep or create blocking or long-running tests.
+10. Return only complete Python source code for one supplementary pytest module.
+11. Do not include Markdown fences or explanations.
 """
 
     @staticmethod
