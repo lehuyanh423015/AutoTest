@@ -7,6 +7,7 @@ import pytest
 from autotest.artifact_store import ArtifactStore
 from autotest.errors import ArtifactError
 from autotest.failure_analyzer import FailureAnalyzer
+from autotest.mutation_runner import MutationResult, MutationStatus
 from autotest.project_analyzer import FunctionInfo
 from autotest.repair_engine import (
     AttemptKind,
@@ -195,3 +196,42 @@ def test_phase2_attempt_and_session_metadata_are_immutable(tmp_path: Path) -> No
     assert not any(path.name in {".pytest_cache", "__pycache__"} for path in run.run_dir.rglob("*"))
     with pytest.raises(ArtifactError, match="Refusing to overwrite"):
         store.save_attempt_result(attempt_files, attempt, execution_timeout_seconds=30.0)
+
+
+def test_mutation_artifacts_are_immutable_and_normalized(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "runs")
+    run = store.create_run(run_id=RUN_ID, timestamp_utc=TIMESTAMP)
+    artifacts = store.create_mutation(run)
+    raw = artifacts.raw_stats_file
+    raw.write_text('{"killed": 2}\n', encoding="utf-8")
+    result = MutationResult(
+        target_file=tmp_path / "source.py",
+        function_name="classify",
+        status=MutationStatus.COMPLETE,
+        total_mutants=3,
+        killed_mutants=2,
+        survived_mutants=1,
+        tool_total_mutants=3,
+        mutation_score_percent=200 / 3,
+        duration_seconds=1.25,
+        backend_version="3.7.0",
+        python_version="Python 3.10.12",
+        pytest_version="pytest 8.4.2",
+        raw_stats_file=raw,
+        workspace=artifacts.workspace,
+        hashes={"target_source_sha256": "abc"},
+        stdout="tool output\n",
+        stderr="",
+    )
+
+    metadata = store.save_mutation_result(artifacts, result)
+
+    assert json.loads(artifacts.result_file.read_text(encoding="utf-8")) == metadata
+    assert metadata["status"] == "COMPLETE"
+    assert metadata["mutation_score_percent"] == pytest.approx(66.6666667)
+    assert artifacts.stdout_file.read_text(encoding="utf-8") == "tool output\n"
+    assert artifacts.stderr_file.read_text(encoding="utf-8") == ""
+    with pytest.raises(ArtifactError, match="Refusing to overwrite"):
+        store.save_mutation_result(artifacts, result)
+    with pytest.raises(ArtifactError, match="Refusing to overwrite"):
+        store.create_mutation(run)

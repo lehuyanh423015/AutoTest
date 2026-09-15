@@ -23,9 +23,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = '-ra -m "not mutation"'
 markers = [
     "ollama: integration tests requiring a local Ollama server and model",
+    "mutation: integration tests requiring WSL and the pinned Mutmut environment",
 ]
 
 [tool.ruff]

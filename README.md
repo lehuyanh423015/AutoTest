@@ -1,8 +1,8 @@
-# AutoTest — Phase 3 coverage-guided test generation
+# AutoTest — Phase 4A mutation testing evaluation
 
 AutoTest is a research prototype that asks a local large language model to generate pytest
-tests for a selected Python function. Phase 3 extends the frozen execution/repair pipeline with
-target-function coverage feedback:
+tests for a selected Python function. Phase 4A adds opt-in mutation-quality evaluation after the
+frozen generation, repair, and coverage pipeline has produced a final passing cumulative suite:
 
 ```text
 standalone .py file -> AST analysis -> deterministic prompt -> Ollama
@@ -10,6 +10,7 @@ standalone .py file -> AST analysis -> deterministic prompt -> Ollama
                     -> failure analysis -> repair prompt -> bounded retry
                     -> line/branch coverage baseline -> target reached?
                     -> additional test -> cumulative execution/repair -> coverage comparison
+                    -> final passing suite -> isolated WSL/Mutmut evaluation -> mutation metrics
 ```
 
 The current scope is one standalone Python file and one named top-level function at a time.
@@ -32,7 +33,8 @@ process with a configurable timeout.
 - `coverage_runner.py` invokes coverage.py in subprocesses and normalizes only the selected
   function's lines and branch arcs.
 - `coverage_engine.py` owns the bounded, transactional supplementary-test loop.
-- `main.py` connects the components and reports execution and coverage outcomes separately.
+- `mutation_runner.py` defines the backend boundary and invokes pinned Mutmut through WSL.
+- `main.py` reports execution, coverage, and mutation outcomes separately.
 
 The pytest subprocess runs in the controlled generated-test directory and uses that directory as
 its explicit pytest root. The target file's parent directory is prepended to `PYTHONPATH` in the
@@ -51,6 +53,10 @@ record rather than accumulating execution caches.
 - [Ollama](https://ollama.com/) for real generation
 - The baseline model `qwen2.5-coder:14b`
 
+Mutation evaluation has a separate WSL environment containing Python, pytest, and exactly
+`mutmut==3.7.0`. Mutmut is intentionally absent from the main Windows environment,
+`pyproject.toml`, and `uv.lock`. Setup details and isolated pins live under `tools/mutation/`.
+
 Install the locked project environment:
 
 ```powershell
@@ -67,7 +73,7 @@ ollama pull qwen2.5-coder:14b
 If Ollama already runs as a Windows service, a separate `ollama serve` process is unnecessary.
 The default endpoint is `http://localhost:11434`.
 
-## Run the Phase 3 CLI
+## Run the Phase 4A CLI
 
 From the repository root:
 
@@ -82,7 +88,10 @@ uv run python -m autotest.main `
 
 Useful options include `--model`, `--ollama-url`, `--output-dir`, `--timeout`,
 `--ollama-timeout`, `--temperature`, `--max-repair-attempts`, `--max-coverage-rounds`, and
-`--coverage-target`. Both bounded-loop limits default to `3`; the coverage target defaults to
+`--coverage-target`. Phase 4A adds `--mutation`, `--mutation-timeout`, and `--mutation-venv`;
+mutation is off by default, its outer timeout defaults to 300 seconds, and its isolated WSL
+environment defaults to `/home/ubuntu/autotest-mutation-env`. Both bounded-loop limits default to `3`;
+the coverage target defaults to
 `100`. A repair limit of `0` reproduces direct Phase 1 generation/execution. A coverage-round
 limit of `0` still measures the baseline but makes no coverage-generation request:
 
@@ -128,6 +137,45 @@ Coverage stops at `TARGET_REACHED`, `MAX_ROUNDS_REACHED`, `NO_COVERAGE_IMPROVEME
 High coverage does not prove that a test suite is correct or effective at detecting faults.
 
 Coverage feedback complements execution feedback; it does not replace it.
+
+## Mutation evaluation
+
+Mutation testing evaluates whether tests detect artificial changes to program behavior. It gives
+stronger evidence than line execution alone because it checks whether assertions distinguish the
+current behavior from small altered behaviors. High code coverage does not imply high mutation
+score; both metrics are retained and reported independently.
+
+Phase 4A runs only when `--mutation` is supplied and the final accepted cumulative suite has
+execution status `PASS`. It makes zero mutation-guided LLM calls. Phase 4A does not use surviving
+mutants to generate new tests. A low score never changes the passing execution status and is not a
+quality gate. A survived mutant does not automatically mean the generated test suite is incorrect;
+equivalent or irrelevant mutants can exist.
+
+On Windows, AutoTest invokes Python, pytest, and Mutmut by absolute path inside the configured WSL
+virtualenv; it does not rely on activation, shell initialization, or global WSL tools. It validates
+pytest 8.4.2 and Mutmut 3.7.0 exactly. It creates a
+fresh workspace containing only the target file and final accepted tests, runs a clean pytest
+baseline there, then uses Mutmut 3.7.0's generated key pattern
+`<module>.x_<function>__mutmut_*`. The target is copied to the workspace root so unchanged accepted
+imports such as `from calculator import divide` produce the same module key Mutmut sees.
+`source_paths` contains only that exact file; generated tests are not mutated. Original source and
+accepted-test hashes are checked after the tool runs.
+
+```powershell
+uv run python -m autotest.main `
+    --file tests/fixtures/sample_project/branching.py `
+    --function classify_number `
+    --mutation `
+    --mutation-timeout 300
+```
+
+AutoTest normalizes the supported Mutmut 3.7.0 `export-cicd-stats` JSON. Its score is
+`killed / (killed + survived) * 100`. Timeout, skipped, suspicious, no-tests, interrupted, and
+segfault categories are persisted but excluded from the denominator. If killed plus survived is
+zero, the score is N/A. The export omits not-checked and caught-by-type-check counts, so their
+aggregate difference from the tool total is recorded conservatively as `unreported_mutants`.
+With AutoTest's type-check command disabled, mutants outside the selected-function run remain not
+checked and do not contribute to the selected total or score.
 
 ## Repair policy
 
@@ -177,6 +225,25 @@ workspace/runs/<UTC-timestamp>-<random-id>/
         └── candidate/attempt-000/...
 ```
 
+Phase 4A adds an independent mutation subtree when requested:
+
+```text
+mutation/
+├── mutation_result.json
+├── mutmut_raw_stats.json
+├── stdout.txt
+├── stderr.txt
+├── config/pyproject.toml
+└── workspace/
+    ├── <target>.py
+    ├── tests/test_accepted_*.py
+    └── mutants/...
+```
+
+The exact raw export is authoritative. Normalized categories, WSL tool versions, input/config
+hashes, duration, and infrastructure errors are stored separately. No Mutmut cache is shared
+between research runs.
+
 Attempt 0 is always the initial generation; later attempts are repairs. Files use exclusive UTF-8
 writes, so completed attempts are never overwritten. Every attempt records execution output,
 status, timing, failure category, test/assert counts, quality warnings, and prompt/test SHA-256
@@ -207,6 +274,9 @@ analysis/generation/artifact pipeline error, and `3` for TIMEOUT. Expected error
 `--debug` enables tracebacks for diagnosis. Failing to reach the requested coverage target does
 not turn a passing suite into FAIL and does not introduce a new exit code. A genuine coverage
 infrastructure failure uses the existing pipeline-error exit code 2.
+Likewise, a low mutation score preserves exit code 0 for a passing suite. Requested mutation
+infrastructure failure uses exit code 2. Mutation has separate `COMPLETE`, `NO_MUTANTS`,
+`TOOL_UNAVAILABLE`, `TOOL_ERROR`, and `TIMEOUT` statuses.
 
 The effective research baseline is model `qwen2.5-coder:14b`, Ollama URL
 `http://localhost:11434`, HTTP timeout 120 seconds, and temperature `0.0`. These controls reduce
@@ -230,12 +300,21 @@ $env:AUTOTEST_RUN_OLLAMA = "1"
 uv run pytest -m ollama tests/test_ollama_integration.py -v
 ```
 
+The default suite skips live mutation and needs neither WSL nor Mutmut. Opt into the real pinned
+backend integration with:
+
+```powershell
+uv run pytest -m mutation tests/test_mutation_integration.py -v
+```
+
 ## Current limitations
 
-Phase 3 supports one standalone Python file and one top-level sync or async function. It does not
+Phase 4A supports one standalone Python file and one top-level sync or async function. It does not
 prepare arbitrary repository dependencies, analyze methods or cross-file context, verify test
-oracles against an external specification, perform semantic branch interpretation, run mutation
-testing, or provide OS/container sandboxing. Accepted-test prompt context is character-bounded,
+oracles against an external specification, identify equivalent mutants, use mutation feedback for
+generation, or provide OS/container sandboxing. Mutation requires a separately provisioned
+Ubuntu 22.04 WSL environment and currently supports only pinned Mutmut 3.7.0. Accepted-test prompt
+context is character-bounded,
 not repository-scale context selection. AutoTest never repairs or modifies target source code.
 
 Generated tests are untrusted code. The timeout and separate process are basic safety boundaries,

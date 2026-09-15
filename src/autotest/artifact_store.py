@@ -18,6 +18,7 @@ from autotest.test_runner import TestRunResult
 
 if TYPE_CHECKING:
     from autotest.coverage_engine import CoverageRoundResult, CoverageSessionResult
+    from autotest.mutation_runner import MutationResult
     from autotest.repair_engine import RepairSessionResult, TestAttempt
 
 _RUN_ID_PATTERN = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{6}")
@@ -60,6 +61,19 @@ class CoverageRoundArtifacts:
     raw_response_file: Path
     generated_test_file: Path
     result_file: Path
+
+
+@dataclass(frozen=True, slots=True)
+class MutationArtifacts:
+    """Locations reserved for one isolated mutation evaluation."""
+
+    mutation_dir: Path
+    result_file: Path
+    raw_stats_file: Path
+    stdout_file: Path
+    stderr_file: Path
+    config_dir: Path
+    workspace: Path
 
 
 class ArtifactStore:
@@ -188,6 +202,42 @@ class ArtifactStore:
             generated_test_file=round_dir / "generated_test.py",
             result_file=round_dir / "result.json",
         )
+
+    def create_mutation(self, run: RunArtifacts) -> MutationArtifacts:
+        """Reserve a fresh mutation subtree for this unique run."""
+        mutation_dir = run.run_dir / "mutation"
+        config_dir = mutation_dir / "config"
+        try:
+            mutation_dir.mkdir(exist_ok=False)
+            config_dir.mkdir()
+        except FileExistsError as exc:
+            raise ArtifactError(
+                f"Refusing to overwrite existing mutation directory: {mutation_dir}"
+            ) from exc
+        except OSError as exc:
+            raise ArtifactError(f"Could not create mutation directory: {exc}") from exc
+        return MutationArtifacts(
+            mutation_dir=mutation_dir,
+            result_file=mutation_dir / "mutation_result.json",
+            raw_stats_file=mutation_dir / "mutmut_raw_stats.json",
+            stdout_file=mutation_dir / "stdout.txt",
+            stderr_file=mutation_dir / "stderr.txt",
+            config_dir=config_dir,
+            workspace=mutation_dir / "workspace",
+        )
+
+    def save_mutation_result(
+        self, artifacts: MutationArtifacts, result: MutationResult
+    ) -> dict[str, Any]:
+        """Persist normalized mutation metadata and captured tool output immutably."""
+        self._write_new_text(artifacts.stdout_file, result.stdout)
+        self._write_new_text(artifacts.stderr_file, result.stderr)
+        metadata = self._mutation_metadata(result)
+        self._write_new_text(
+            artifacts.result_file,
+            f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n",
+        )
+        return metadata
 
     def save_coverage_prompt(self, artifacts: CoverageRoundArtifacts, prompt: str) -> None:
         self._write_new_text(artifacts.prompt_file, prompt)
@@ -373,6 +423,10 @@ class ArtifactStore:
         coverage_session: CoverageSessionResult | None = None,
         max_coverage_rounds: int | None = None,
         coverage_target: float | None = None,
+        mutation_enabled: bool | None = None,
+        mutation_timeout_seconds: float | None = None,
+        mutation_result: MutationResult | None = None,
+        mutation_skipped_reason: str | None = None,
     ) -> dict[str, Any]:
         """Persist the root summary for a complete bounded repair session."""
         initial_attempt = session.attempts[0]
@@ -440,11 +494,68 @@ class ArtifactStore:
                 max_coverage_rounds=max_coverage_rounds,
                 coverage_target=coverage_target,
             )
+        if mutation_enabled is not None:
+            if mutation_result is None:
+                metadata["mutation"] = {
+                    "enabled": mutation_enabled,
+                    "status": None,
+                    "timeout_seconds": mutation_timeout_seconds,
+                    "skipped_reason": (
+                        mutation_skipped_reason
+                        or ("EXECUTION_NOT_PASSING" if mutation_enabled else "NOT_REQUESTED")
+                    ),
+                }
+            else:
+                metadata["mutation"] = {
+                    "enabled": True,
+                    "timeout_seconds": mutation_timeout_seconds,
+                    **self._mutation_metadata(mutation_result),
+                }
+                final_coverage = (
+                    coverage_session.final_coverage if coverage_session is not None else None
+                )
+                metadata["mutation"]["final_line_coverage"] = (
+                    final_coverage.line_coverage_percent if final_coverage is not None else None
+                )
+                metadata["mutation"]["final_branch_coverage"] = (
+                    final_coverage.branch_coverage_percent if final_coverage is not None else None
+                )
         self._write_new_text(
             run.result_file,
             f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n",
         )
         return metadata
+
+    @staticmethod
+    def _mutation_metadata(result: MutationResult) -> dict[str, Any]:
+        return {
+            "backend": result.backend,
+            "backend_version": result.backend_version,
+            "status": result.status.value,
+            "total_mutants": result.total_mutants,
+            "tool_total_mutants": result.tool_total_mutants,
+            "killed_mutants": result.killed_mutants,
+            "survived_mutants": result.survived_mutants,
+            "no_tests_mutants": result.no_tests_mutants,
+            "skipped_mutants": result.skipped_mutants,
+            "suspicious_mutants": result.suspicious_mutants,
+            "timeout_mutants": result.timeout_mutants,
+            "interrupted_mutants": result.interrupted_mutants,
+            "segfault_mutants": result.segfault_mutants,
+            "unreported_mutants": result.unreported_mutants,
+            "unknown_categories": dict(result.unknown_categories),
+            "mutation_score_percent": result.mutation_score_percent,
+            "duration_seconds": result.duration_seconds,
+            "python_version": result.python_version,
+            "pytest_version": result.pytest_version,
+            "mutation_venv": result.mutation_venv,
+            "raw_stats_file": (
+                result.raw_stats_file.name if result.raw_stats_file is not None else None
+            ),
+            "workspace": str(result.workspace) if result.workspace is not None else None,
+            "hashes": dict(result.hashes),
+            "error_message": result.error_message,
+        }
 
     def _coverage_session_metadata(
         self,

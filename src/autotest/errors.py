@@ -39,3 +39,11 @@ class TestExecutionError(AutoTestError):
 
 class CoverageError(AutoTestError):
     """Raised when coverage execution or report parsing cannot complete safely."""
+
+
+class MutationError(AutoTestError):
+    """Raised when mutation evaluation cannot complete safely."""
+
+
+class MutationEnvironmentUnavailableError(MutationError):
+    """Raised when the isolated mutation toolchain is unavailable or incompatible."""

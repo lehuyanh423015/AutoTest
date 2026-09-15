@@ -13,6 +13,12 @@ from autotest.coverage_engine import CoverageEngine, CoverageSessionResult, Cove
 from autotest.coverage_runner import CoverageRunner
 from autotest.errors import AutoTestError
 from autotest.llm.ollama_provider import OllamaConfig, OllamaProvider
+from autotest.mutation_runner import (
+    DEFAULT_MUTATION_VENV,
+    MutationResult,
+    MutationStatus,
+    WSLMutmutBackend,
+)
 from autotest.project_analyzer import ProjectAnalyzer
 from autotest.repair_engine import RepairEngine, RepairSessionResult
 from autotest.test_runner import TestRunner, TestRunResult, TestStatus
@@ -37,6 +43,16 @@ def _coverage_percentage(value: str) -> float:
         raise argparse.ArgumentTypeError("must be a number") from exc
     if not math.isfinite(parsed) or not 0 <= parsed <= 100:
         raise argparse.ArgumentTypeError("must be between zero and 100")
+    return parsed
+
+
+def _positive_number(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
     return parsed
 
 
@@ -82,6 +98,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=100.0,
         help="Target-function line and applicable branch coverage percentage (default: 100)",
     )
+    parser.add_argument(
+        "--mutation",
+        action="store_true",
+        help="Evaluate the final passing suite with the external WSL Mutmut backend",
+    )
+    parser.add_argument(
+        "--mutation-timeout",
+        type=_positive_number,
+        default=300.0,
+        help="Overall mutation evaluation timeout in seconds (default: 300)",
+    )
+    parser.add_argument(
+        "--mutation-venv",
+        default=DEFAULT_MUTATION_VENV,
+        help="Absolute path to the isolated virtualenv inside WSL",
+    )
     parser.add_argument("--debug", action="store_true", help="Show debug logging and tracebacks")
     return parser
 
@@ -92,6 +124,8 @@ def _print_result(
     run_dir: Path,
     session: RepairSessionResult,
     coverage: CoverageSessionResult | None,
+    mutation_requested: bool,
+    mutation: MutationResult | None,
 ) -> None:
     final_attempt = session.attempts[-1]
     result = final_attempt.run_result
@@ -144,6 +178,25 @@ def _print_result(
         print(f"Coverage rounds used: {len(coverage.rounds)}")
         print(f"Coverage target reached: {'YES' if coverage.target_reached else 'NO'}")
         print(f"Coverage stop reason: {coverage.stop_reason.value}")
+    if mutation is not None:
+        print("Mutation:")
+        version = mutation.backend_version or "unavailable"
+        print(f"Backend: {mutation.backend} {version}")
+        print(f"Status: {mutation.status.value}")
+        print(f"Mutants: {mutation.total_mutants}")
+        print(f"Killed: {mutation.killed_mutants}")
+        print(f"Survived: {mutation.survived_mutants}")
+        score = (
+            "N/A"
+            if mutation.mutation_score_percent is None
+            else f"{mutation.mutation_score_percent:.2f}%"
+        )
+        print(f"Mutation score: {score}")
+        print(f"Mutation duration: {mutation.duration_seconds:.2f}s")
+        if mutation.error_message:
+            print(f"Mutation error: {mutation.error_message}")
+    elif mutation_requested:
+        print("Mutation: not run because the final accepted suite was not available and passing")
     print("pytest stdout:")
     print(result.stdout.rstrip() or "(empty)")
     print("pytest stderr:")
@@ -200,6 +253,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 coverage_target=args.coverage_target,
                 max_repair_attempts=args.max_repair_attempts,
             ).run(function, run, session)
+        mutation_result = None
+        coverage_failed = coverage_session is not None and coverage_session.stop_reason in (
+            CoverageStopReason.COVERAGE_ERROR,
+            CoverageStopReason.PIPELINE_ERROR,
+        )
+        if args.mutation and session.final_status is TestStatus.PASS and not coverage_failed:
+            mutation_artifacts = artifact_store.create_mutation(run)
+            accepted_tests = (
+                coverage_session.accepted_test_files
+                if coverage_session is not None
+                else (session.attempts[-1].test_file,)
+            )
+            mutation_result = WSLMutmutBackend(
+                timeout=args.mutation_timeout,
+                mutation_venv=args.mutation_venv,
+            ).run(
+                function,
+                accepted_tests,
+                mutation_artifacts.mutation_dir,
+            )
+            artifact_store.save_mutation_result(mutation_artifacts, mutation_result)
         artifact_store.save_session_result(
             run,
             function,
@@ -214,6 +288,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             coverage_session=coverage_session,
             max_coverage_rounds=args.max_coverage_rounds,
             coverage_target=args.coverage_target,
+            mutation_enabled=args.mutation,
+            mutation_timeout_seconds=args.mutation_timeout,
+            mutation_result=mutation_result,
+            mutation_skipped_reason=(
+                "COVERAGE_PIPELINE_ERROR" if args.mutation and coverage_failed else None
+            ),
         )
         LOGGER.info("Final status: %s", session.final_status.value)
         LOGGER.info("Run artifacts: %s", run.run_dir)
@@ -223,10 +303,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             run.run_dir,
             session,
             coverage_session,
+            args.mutation,
+            mutation_result,
         )
-        if coverage_session is not None and coverage_session.stop_reason in (
-            CoverageStopReason.COVERAGE_ERROR,
-            CoverageStopReason.PIPELINE_ERROR,
+        if coverage_failed:
+            return 2
+        if mutation_result is not None and mutation_result.status in (
+            MutationStatus.TOOL_UNAVAILABLE,
+            MutationStatus.TOOL_ERROR,
+            MutationStatus.TIMEOUT,
         ):
             return 2
         return _exit_code(session.attempts[-1].run_result)

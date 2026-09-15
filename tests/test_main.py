@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,6 +9,7 @@ from autotest.coverage_runner import CoverageResult
 from autotest.errors import AnalyzerError
 from autotest.failure_analyzer import FailureAnalyzer
 from autotest.main import main
+from autotest.mutation_runner import MutationResult, MutationStatus
 from autotest.repair_engine import (
     AttemptKind,
     RepairSessionResult,
@@ -69,6 +71,7 @@ def run_mocked_cli(
     tmp_path: Path,
     session: RepairSessionResult,
     *extra_args: str,
+    mutation_result: MutationResult | None = None,
 ) -> tuple[int, object]:
     source = tmp_path / "calculator.py"
     source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
@@ -87,9 +90,11 @@ def run_mocked_cli(
     with (
         patch("autotest.main.RepairEngine") as engine_class,
         patch("autotest.main.CoverageEngine") as coverage_engine_class,
+        patch("autotest.main.WSLMutmutBackend") as mutation_backend_class,
     ):
         engine_class.return_value.run.return_value = session
         coverage_engine_class.return_value.run.return_value = coverage_session
+        mutation_backend_class.return_value.run.return_value = mutation_result
         exit_code = main(
             [
                 "--file",
@@ -193,6 +198,75 @@ def test_cli_rejects_invalid_coverage_options(tmp_path: Path, option: str, value
         main(["--file", str(source), "--function", "add", option, value])
 
     assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_cli_rejects_invalid_mutation_timeout(tmp_path: Path, value: str) -> None:
+    source = tmp_path / "calculator.py"
+    source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--file", str(source), "--function", "add", "--mutation-timeout", value])
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_mutation_success_preserves_pass_exit_and_root_metrics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "calculator.py"
+    result = MutationResult(
+        source,
+        "add",
+        MutationStatus.COMPLETE,
+        total_mutants=4,
+        killed_mutants=1,
+        survived_mutants=3,
+        tool_total_mutants=4,
+        mutation_score_percent=25.0,
+        duration_seconds=2.0,
+        backend_version="3.7.0",
+    )
+
+    exit_code, _ = run_mocked_cli(
+        tmp_path,
+        make_session(tmp_path, [RunStatus.PASS]),
+        "--mutation",
+        mutation_result=result,
+    )
+
+    assert exit_code == 0
+    assert "Mutation score: 25.00%" in capsys.readouterr().out
+    root = json.loads((next((tmp_path / "runs").iterdir()) / "result.json").read_text())
+    assert root["mutation"]["status"] == "COMPLETE"
+    assert root["mutation"]["final_line_coverage"] == 100.0
+
+
+@pytest.mark.parametrize(
+    "status",
+    [MutationStatus.TOOL_UNAVAILABLE, MutationStatus.TOOL_ERROR, MutationStatus.TIMEOUT],
+)
+def test_cli_requested_mutation_infrastructure_error_uses_exit_two(
+    tmp_path: Path, status: MutationStatus
+) -> None:
+    result = MutationResult(tmp_path / "calculator.py", "add", status, error_message="tool error")
+
+    exit_code, _ = run_mocked_cli(
+        tmp_path,
+        make_session(tmp_path, [RunStatus.PASS]),
+        "--mutation",
+        mutation_result=result,
+    )
+
+    assert exit_code == 2
+
+
+def test_cli_does_not_run_requested_mutation_when_tests_fail(tmp_path: Path) -> None:
+    exit_code, _ = run_mocked_cli(tmp_path, make_session(tmp_path, [RunStatus.FAIL]), "--mutation")
+
+    assert exit_code == 1
+    root = json.loads((next((tmp_path / "runs").iterdir()) / "result.json").read_text())
+    assert root["mutation"]["skipped_reason"] == "EXECUTION_NOT_PASSING"
 
 
 def test_cli_rejects_negative_repair_count(tmp_path: Path) -> None:
