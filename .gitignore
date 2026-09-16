@@ -14,3 +14,7 @@ temp/
 workspace/
 
 .vscode/*.log
+
+.stignore
+
+.stfolder/
