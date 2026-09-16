@@ -25,6 +25,7 @@ from autotest.mutation_runner import (
     WSLMutmutBackend,
 )
 from autotest.project_analyzer import ProjectAnalyzer
+from autotest.project_inspector import ProjectInspector, ProjectProfile
 from autotest.repair_engine import RepairEngine, RepairSessionResult
 from autotest.test_runner import TestRunner, TestRunResult, TestStatus
 
@@ -73,8 +74,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="autotest",
         description="Generate and run pytest tests for one top-level Python function.",
     )
-    parser.add_argument("--file", required=True, type=Path, help="Standalone Python source file")
-    parser.add_argument("--function", required=True, help="Exact top-level function name")
+    parser.add_argument("--file", type=Path, help="Standalone Python source file")
+    parser.add_argument("--function", help="Exact top-level function name")
+    parser.add_argument(
+        "--inspect-project", type=Path, help="Statically inspect a local project directory"
+    )
+    parser.add_argument(
+        "--profile-output", type=Path, help="Write inspection JSON to this explicit path"
+    )
     parser.add_argument("--model", default="qwen2.5-coder:14b", help="Ollama model name")
     parser.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama base URL")
     parser.add_argument(
@@ -281,14 +288,63 @@ def _exit_code(result: TestRunResult) -> int:
     }[result.status]
 
 
+def _print_profile(profile: ProjectProfile, output: Path | None) -> None:
+    def paths(items: tuple[Path, ...]) -> str:
+        return (
+            ", ".join(path.relative_to(profile.root).as_posix() or "." for path in items) or "none"
+        )
+
+    print(f"Project: {profile.project_name}")
+    print(f"Python project: {'yes' if profile.is_python_project else 'no'}")
+    print(f"Python requirement: {profile.python_requirement or 'unknown'}")
+    print(f"Build backend: {profile.build_backend or 'unknown'}")
+    print(f"Package/dependency workflow: {profile.package_manager or 'unknown'}")
+    print(f"Metadata: {paths(profile.metadata_files)}")
+    print(f"Dependency files: {paths(profile.dependency_files)}")
+    print(f"Lock files: {paths(profile.lock_files)}")
+    print(f"Source roots: {paths(profile.source_roots)}")
+    print(f"Test roots: {paths(profile.test_roots)}")
+    print(f"Python modules: {len(profile.modules)}")
+    print(
+        f"Top-level functions: {sum(len(module.top_level_functions) for module in profile.modules)}"
+    )
+    print(f"Test framework evidence: {profile.test_framework or 'none'}")
+    for warning in profile.warnings:
+        print(f"Warning: {warning}")
+    if output is not None:
+        print(f"Profile: {output}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.inspect_project is None:
+        if args.profile_output is not None:
+            parser.error("--profile-output requires --inspect-project")
+        if args.file is None or args.function is None:
+            parser.error("--file and --function are required unless --inspect-project is used")
+    elif args.file is not None or args.function is not None:
+        parser.error("--inspect-project cannot be combined with --file or --function")
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
 
     try:
+        if args.inspect_project is not None:
+            profile = ProjectInspector().inspect(args.inspect_project)
+            output = args.profile_output
+            if output is not None:
+                output = output.resolve()
+                try:
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    with output.open("x", encoding="utf-8", newline="\n") as target:
+                        target.write(profile.to_json())
+                except OSError as exc:
+                    LOGGER.error("Could not save project profile: %s", exc)
+                    return 2
+            _print_profile(profile, output)
+            return 0
         analyzer = ProjectAnalyzer()
         function = analyzer.analyze_function(args.file, args.function)
         LOGGER.info("Analyzed %s from %s", function.function_name, function.file_path)

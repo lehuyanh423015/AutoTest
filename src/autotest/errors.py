@@ -9,6 +9,10 @@ class AnalyzerError(AutoTestError):
     """Raised when a target source file cannot be analyzed."""
 
 
+class ProjectInspectionError(AutoTestError):
+    """Raised when static repository inspection cannot proceed."""
+
+
 class FunctionNotFoundError(AnalyzerError):
     """Raised when the requested top-level function does not exist."""
 

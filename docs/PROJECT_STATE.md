@@ -2,11 +2,11 @@
 
 ## Project Objective
 
-AutoTest is a research prototype that generates pytest tests for one named top-level Python function in one standalone `.py` file, then records execution, target-function coverage, and optional mutation evidence. The repository is the source of truth; Phase 1 and 1.1 reports are absent.
+AutoTest is a research prototype that generates pytest tests for one named top-level Python function in one standalone `.py` file, then records execution, target-function coverage, and optional mutation evidence. It also statically profiles local Python repositories for future phases. The repository is the source of truth; Phase 1 and 1.1 reports are absent.
 
 ## Current Milestone
 
-Phase 4B is implemented and frozen. `main` and tag `phase-4b-frozen` point to commit `52a7abe` (audit date: 2026-09-16). Earlier tags are `environment-v1.0`, `phase-2-frozen`, `phase-3-frozen`, and `phase-4a-frozen`. The worktree was already dirty before this audit: `.gitattributes`, `.gitignore`, `.syncthing-ignore`, `pyproject.toml`, and `tests/test_smoke.py` were marked modified, and `.stfolder/` was untracked. Only the two ignore files have substantive diff content; the other marked files have line-ending differences. This audit adds only this document.
+Phase 5A repository inspection is implemented for review; the latest frozen milestone remains Phase 4B at tag `phase-4b-frozen` (`52a7abe`). Earlier frozen tags are `environment-v1.0`, `phase-2-frozen`, `phase-3-frozen`, and `phase-4a-frozen`. Phase 5A adds static discovery alongside the unchanged single-file generation pipeline. The worktree was clean at the start of Phase 5A implementation; no commit or tag was created for this phase.
 
 ## Implemented Phases
 
@@ -15,16 +15,20 @@ Phase 4B is implemented and frozen. `main` and tag `phase-4b-frozen` point to co
 - Phase 3: subprocess line/branch coverage for the selected function and transactional supplementary test generation.
 - Phase 4A: opt-in, evaluation-only mutation testing through isolated WSL/Mutmut; no survivor-driven LLM calls.
 - Phase 4B: separately opt-in survivor-diff prompts, supplementary candidates, and transactional mutation improvement checks.
+- Phase 5A: separate static local-project inspection, structured `ProjectProfile`, deterministic JSON, and `--inspect-project` CLI mode. It does not prepare or execute target environments.
 
 ## Current Pipeline
 
 `ProjectAnalyzer` parses source without importing it. `RepairEngine` builds the initial prompt, calls `LLMProvider`, persists attempt 0, and runs pytest through `TestRunner`; non-PASS outcomes can receive up to the configured repair limit. Only a PASS suite enters `CoverageEngine`, which measures baseline coverage even with zero feedback rounds. Each coverage proposal is a new module, can use candidate-only repair, and joins the cumulative suite only after PASS and a non-regressing target coverage gain. Optional `--mutation` evaluates that accepted suite in a fresh WSL workspace. `--mutation-feedback` also extracts survivor IDs/diffs, generates additional modules, checks the original suite, remeasures coverage, and reruns mutation; it accepts only stable-universe, non-regressing mutation improvement. Root `result.json` is written after orchestration. A nonpassing Phase 2 suite skips coverage and mutation; a coverage infrastructure error skips mutation and exits 2.
+
+Separately, `ProjectInspector` takes a local directory, statically reads known metadata/dependency files, discovers source/test roots and Python modules, parses top-level declarations with AST, and returns `ProjectProfile`. Inspection mode makes no Ollama call, target import, test subprocess, or dependency installation. Optional JSON output is independent of the Phase 1–4B run-artifact schema.
 
 ## Core Architecture
 
 | Concern | Implementation |
 | --- | --- |
 | Source analysis | `project_analyzer.py`: `ProjectAnalyzer`, `FunctionInfo` (top-level sync/async functions) |
+| Repository inspection | `project_inspector.py`: `ProjectInspector`, immutable `ProjectProfile`, `PythonModuleInfo`, `FunctionSummary`, dependency and Python-requirement declarations |
 | Prompts and LLM | `prompt_builder.py`: `PromptBuilder`; `llm/base.py`: `LLMProvider`; `llm/ollama_provider.py`: `OllamaProvider` |
 | Generation and execution | `test_generator.py`: `TestGenerator`, `sanitize_test_code`; `test_runner.py`: `TestRunner` |
 | Feedback and repair | `failure_analyzer.py`: `FailureAnalyzer`; `test_quality.py`: AST diagnostics; `repair_engine.py`: `RepairEngine` |
@@ -51,6 +55,8 @@ Repository pins CPython `3.12.10` (`.python-version`, `requires-python >=3.12,<3
 ## CLI Capabilities
 
 `uv run python -m autotest.main --file <file.py> --function <top-level-name>` accepts model/URL/output, pytest and Ollama timeouts, temperature, repair and coverage limits/target, opt-in `--mutation` or `--mutation-feedback`, mutation round/survivor bounds, mutation timeout/venv, and `--debug`. Defaults include `workspace/runs`, 30-second test timeout, 3 repair rounds, 3 coverage rounds, 100% coverage target, 3 mutation feedback rounds, and 5 survivors per round. There is no CLI option for the WSL distribution name.
+
+`uv run python -m autotest.main --inspect-project <directory> [--profile-output <file>]` runs only static inspection. It needs no `--file`/`--function`, prints a summary, and optionally writes portable UTF-8 JSON to the explicitly requested path. Exit 0 means inspection completed, including a non-Python directory; exit 2 means inspection or output persistence failed. It does not report test execution statuses.
 
 ## Artifact Structure
 
@@ -91,9 +97,13 @@ $env:AUTOTEST_RUN_OLLAMA_MUTATION_FEEDBACK = '1'; uv run pytest -m 'mutation and
 
 On 2026-09-16, `uv sync --frozen` passed (12 packages checked); both Ruff checks passed (52 files formatted); default pytest passed with **175 passed, 3 skipped, 3 deselected**. Phase reports give historical counts, not the current baseline. Live integrations were not rerun during this audit.
 
+The Phase 5A development baseline started from that green suite. Phase 5A adds local fixture tests for metadata parsing, static `setup.py`, source/test roots, function discovery, safety limits, deterministic JSON, and inspection CLI isolation. Its validation result is recorded in `docs/phase_reports/phase-5a.md`.
+
 ## Known Limitations
 
-Scope is one standalone file and one top-level function. No arbitrary repository dependency discovery, package/method context, environment preparation, external specification, equivalent-mutant classification, or source repair exists. Prompt context is character bounded. PASS, coverage, and mutation score are distinct evidence, never semantic correctness proofs. Generated tests are untrusted; subprocess timeouts and WSL workspaces are not a security sandbox.
+Generation scope is one standalone file and one top-level function. No package/method context, environment preparation, external specification, equivalent-mutant classification, or source repair exists. Prompt context is character bounded. PASS, coverage, and mutation score are distinct evidence, never semantic correctness proofs. Generated tests are untrusted; subprocess timeouts and WSL workspaces are not a security sandbox.
+
+Phase 5A discovers dependency declarations and layout but does not resolve or install dependencies, interpret lockfile solver semantics, execute target code, select cross-file context, or run generation against a repository. Dynamic `setup.py` values remain warnings. The source scan is bounded to 2 MiB per file and 10,000 Python files by default; excluded directories and directory symlinks are not traversed.
 
 ## Important Safety Constraints
 
@@ -109,4 +119,4 @@ The WSL backend's distribution name is fixed in code and differs from this PC's 
 
 ## Recommended Next Phase
 
-Plan repository-scale support without implementing it yet: define project inspection and dependency/environment discovery, isolated target environments, package import and cross-file context selection, and reproducible trials on real open-source repositories. Specify how subprocesses receive project dependencies and how source/accepted-file integrity and containment will work before broad untrusted-repository trials. Preserve the frozen CLI/status/artifact contracts or explicitly version any future extension. Resolve or configure the WSL distribution alias before mutation-gated validation on this PC.
+Phase 5B — Target Environment Management: use the Phase 5A profile to plan isolated target interpreters and dependency preparation, without changing the frozen generation/repair/coverage/mutation contracts implicitly. Address source/accepted-file integrity and containment before broad untrusted-repository trials. Cross-file context selection and repository test generation remain later work.

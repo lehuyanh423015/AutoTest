@@ -1,0 +1,1 @@
+"""Legacy layout fixture."""

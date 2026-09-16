@@ -1,4 +1,4 @@
-"""Phase 1 of the AutoTest unit-test generation prototype."""
+"""AutoTest generation and static repository-inspection APIs."""
 
 from autotest.artifact_store import (
     ArtifactStore,
@@ -14,6 +14,14 @@ from autotest.coverage_engine import (
 )
 from autotest.coverage_runner import CoverageResult, CoverageRunner
 from autotest.project_analyzer import FunctionInfo, ProjectAnalyzer
+from autotest.project_inspector import (
+    DependencyDeclaration,
+    FunctionSummary,
+    ProjectInspector,
+    ProjectProfile,
+    PythonModuleInfo,
+    PythonRequirementDeclaration,
+)
 from autotest.repair_engine import (
     AttemptKind,
     RepairEngine,
@@ -37,7 +45,13 @@ __all__ = [
     "CoverageRunner",
     "CoverageSessionResult",
     "CoverageStopReason",
+    "DependencyDeclaration",
+    "FunctionSummary",
     "ProjectAnalyzer",
+    "ProjectInspector",
+    "ProjectProfile",
+    "PythonModuleInfo",
+    "PythonRequirementDeclaration",
     "RepairEngine",
     "RepairSessionResult",
     "RunArtifacts",

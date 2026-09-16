@@ -1,7 +1,8 @@
-# AutoTest — Phase 4B mutation-guided test generation
+# AutoTest — Phase 5A repository inspection and Phase 4B test generation
 
 AutoTest is a research prototype that asks a local large language model to generate pytest
-tests for a selected Python function. Phase 4B adds separately opt-in mutation-guided generation
+tests for a selected Python function. Phase 5A adds a separate static repository inspection mode.
+Phase 4B adds separately opt-in mutation-guided generation
 after the frozen generation, repair, coverage, and Phase 4A evaluation pipeline has produced a
 passing cumulative suite:
 
@@ -15,7 +16,7 @@ standalone .py file -> AST analysis -> deterministic prompt -> Ollama
                     -> surviving-mutant diffs -> additional test -> transactional comparison
 ```
 
-The current scope is one standalone Python file and one named top-level function at a time.
+The generation scope is one standalone Python file and one named top-level function at a time.
 Static analysis never imports or executes the target module. Generated code is never evaluated,
 executed, or imported in the AutoTest process; it is saved and passed to pytest in a separate
 process with a configurable timeout.
@@ -23,6 +24,8 @@ process with a configurable timeout.
 ## Architecture
 
 - `project_analyzer.py` discovers and extracts top-level functions with Python's `ast` module.
+- `project_inspector.py` discovers repository metadata, layouts, modules, and top-level functions
+  without importing or executing the inspected project.
 - `prompt_builder.py` creates a deterministic, constrained pytest prompt.
 - `llm/base.py` defines the provider-neutral generation interface.
 - `llm/ollama_provider.py` calls Ollama's `/api/generate` REST endpoint with `urllib.request`.
@@ -59,6 +62,41 @@ record rather than accumulating execution caches.
 Mutation evaluation has a separate WSL environment containing Python, pytest, and exactly
 `mutmut==3.7.0`. Mutmut is intentionally absent from the main Windows environment,
 `pyproject.toml`, and `uv.lock`. Setup details and isolated pins live under `tools/mutation/`.
+
+## Phase 5A: inspect a local repository
+
+Inspection is a separate static operation. It creates a `ProjectProfile` containing declared
+Python compatibility, metadata/dependency/lockfile paths, build backend, inferred dependency
+workflow, source and test roots, Python modules, top-level sync/async functions, evidence, and
+warnings. Paths in the JSON are project-relative; the profile includes a SHA-256 of normalized
+content. The command prints a short summary and optionally writes JSON to an explicit path:
+
+```powershell
+uv run python -m autotest.main --inspect-project tests/fixtures/projects/modern_project
+uv run python -m autotest.main `
+    --inspect-project tests/fixtures/projects/modern_project `
+    --profile-output workspace/project_profiles/modern_project.json
+```
+
+Inspection mode needs neither `--file` nor `--function`. It exits 0 when inspection completes,
+including a non-Python repository with warnings, and 2 when inspection cannot proceed or the
+requested JSON cannot be saved. It does not initialize Ollama or use the generation, pytest,
+coverage, mutation, or run-artifact pipeline. Existing `--file`/`--function` commands retain their
+behavior and exit codes.
+
+Support tiers: `pyproject.toml` and conventional `requirements*.txt` files receive structured or
+conservative declaration parsing; `setup.cfg` and `setup.py` receive limited static parsing;
+`uv.lock`, `poetry.lock`, `Pipfile`, and `Pipfile.lock` are detected but their solver/declaration
+semantics are not parsed. Requirements entries are kept as raw strings, including `-r`, editable,
+and URL entries. Dynamic `setup.py` metadata may remain unresolved by design. Source roots use
+explicit setuptools package-dir evidence, then `src/`, `lib/`, and flat-package conventions. Test
+roots use pytest `testpaths` and `tests/` or `test/` conventions. Python files are parsed with AST;
+methods and nested functions are excluded. Discovery skips directory symlinks, common caches and
+build outputs, and files above 2 MiB; malformed files produce warnings.
+
+**Project inspection does not install dependencies or execute repository code.** It never imports
+target modules, executes `setup.py` or build hooks, runs target tests, or follows directory
+symlinks. It is descriptive input for later phases, not a prepared target environment.
 
 Install the locked project environment:
 
