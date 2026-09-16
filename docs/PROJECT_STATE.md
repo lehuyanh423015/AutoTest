@@ -6,7 +6,7 @@ AutoTest is a research prototype that generates pytest tests for one named top-l
 
 ## Current Milestone
 
-Phase 5B target environment planning and provisioning is implemented for review; the latest frozen milestone is Phase 5A at tag `phase-5a-frozen`. Earlier frozen tags include `phase-4b-frozen`, `phase-4a-frozen`, `phase-3-frozen`, `phase-2-frozen`, and `environment-v1.0`. Phase 5B is separate from the unchanged single-file generation and Phase 5A inspection modes. The worktree was clean at the start of Phase 5B implementation; no commit or tag was created for this phase.
+Phase 5C static cross-file context selection is implemented for review. The latest frozen milestone is Phase 5B at tag `phase-5b-frozen` (commit `3323058`). Earlier frozen tags include `phase-5a-frozen`, `phase-4b-frozen`, `phase-4a-frozen`, `phase-3-frozen`, `phase-2-frozen`, and `environment-v1.0`. Phase 5C is separate from unchanged generation, inspection, and environment modes.
 
 ## Implemented Phases
 
@@ -17,6 +17,7 @@ Phase 5B target environment planning and provisioning is implemented for review;
 - Phase 4B: separately opt-in survivor-diff prompts, supplementary candidates, and transactional mutation improvement checks.
 - Phase 5A: separate static local-project inspection, structured `ProjectProfile`, deterministic JSON, and `--inspect-project` CLI mode. It does not prepare or execute target environments.
 - Phase 5B: deterministic `EnvironmentPlan`, conservative interpreter/dependency policy, fresh copied target workspace, bounded manifests, target venv, pinned runner tooling, and verification. It does not generate tests or execute target code.
+- Phase 5C: `ProjectProfile` plus one project-relative top-level function becomes a portable `ContextBundle` with exact source items, static dependency edges, hashes, unresolved/external evidence, and budget omissions. It does not generate or run tests.
 
 ## Current Pipeline
 
@@ -24,12 +25,15 @@ Phase 5B target environment planning and provisioning is implemented for review;
 
 Separately, `ProjectInspector` takes a local directory, statically reads known metadata/dependency files, discovers source/test roots and Python modules, parses top-level declarations with AST, and returns `ProjectProfile`. Inspection mode makes no Ollama call, target import, test subprocess, or dependency installation. Optional JSON output is independent of the Phase 1–4B run-artifact schema.
 
+`ContextSelector` consumes that profile and one project-relative top-level function. It statically indexes profiled production modules, selects exact declaration-sized source evidence and relevant imports through bounded local dependencies, and records external, unresolved, and omitted evidence. It does not import target code, require the Phase 5B environment, or call PromptBuilder. This is a target-centered static graph, not a whole-program call graph.
+
 ## Core Architecture
 
 | Concern | Implementation |
 | --- | --- |
 | Source analysis | `project_analyzer.py`: `ProjectAnalyzer`, `FunctionInfo` (top-level sync/async functions) |
 | Repository inspection | `project_inspector.py`: `ProjectInspector`, immutable `ProjectProfile`, `PythonModuleInfo`, `FunctionSummary`, dependency and Python-requirement declarations |
+| Static context selection | `context_selector.py`: `ContextSelector`, `ContextTarget`, `ContextSelectionPolicy`, immutable `ContextBundle`, exact source items and edges |
 | Environment planning | `environment_planner.py`: `InterpreterInfo`, immutable `EnvironmentPlan`, compatibility and dependency policy, `EnvironmentPlanner` |
 | Environment provisioning | `environment_provisioner.py`: `EnvironmentProvisioner`, safe copy manifests, bounded argv command runner, `TargetEnvironment` |
 | Prompts and LLM | `prompt_builder.py`: `PromptBuilder`; `llm/base.py`: `LLMProvider`; `llm/ollama_provider.py`: `OllamaProvider` |
@@ -62,6 +66,8 @@ Repository pins CPython `3.12.10` (`.python-version`, `requires-python >=3.12,<3
 `uv run python -m autotest.main --inspect-project <directory> [--profile-output <file>]` runs only static inspection. It needs no `--file`/`--function`, prints a summary, and optionally writes portable UTF-8 JSON to the explicitly requested path. Exit 0 means inspection completed, including a non-Python directory; exit 2 means inspection or output persistence failed. It does not report test execution statuses.
 
 `--plan-environment <directory>` inspects and plans without workspace creation, installation, network, or target execution. `--prepare-environment <directory>` provisions a fresh environment. Both accept `--target-python <path>` and `--environment-offline`; preparation also uses `--environment-output-root` (default `workspace/target_environments`) and `--environment-timeout` (default 600 seconds per command). A supported or unsupported plan exits 0; preparation exits 0 only for `READY`, otherwise 2. Frozen generation and inspection exit contracts are unchanged.
+
+`--select-context <directory> --context-target <relative-file.py>:<function>` performs static selection without `--file`, `--function`, Ollama, a prepared environment, or test execution. Optional `--context-output-root` defaults to `workspace/context_bundles`; policy controls are `--context-max-chars` (32,000), `--context-max-files` (8), `--context-max-items` (24), and `--context-max-depth` (2). The output root must be outside the target project. Each selection gets a fresh directory with `context_bundle.json`, deterministic `context.txt`, and separate elapsed-time `selection_metrics.json`. Complete or partial selection exits 0; invalid targets, oversized mandatory source, or infrastructure failure exits 2.
 
 ## Artifact Structure
 
@@ -100,13 +106,13 @@ uv run pytest -m mutation tests/test_mutation_feedback_integration.py::test_live
 $env:AUTOTEST_RUN_OLLAMA_MUTATION_FEEDBACK = '1'; uv run pytest -m 'mutation and ollama' tests/test_mutation_feedback_integration.py::test_live_ollama_and_mutmut_feedback_is_transactional -v
 ```
 
-On 2026-09-16, `uv sync --frozen` passed (12 packages checked); both Ruff checks passed (52 files formatted); default pytest passed with **175 passed, 3 skipped, 3 deselected**. Phase reports give historical counts, not the current baseline. Live integrations were not rerun during this audit.
+On 2026-09-16, Phase 5C validation passed: `uv sync --frozen` (12 packages checked), Ruff format (89 files) and lint, and default pytest (**269 passed, 3 skipped, 3 deselected**). The three skipped Ollama tests and three deselected mutation tests remain opt-in. The Phase 5B frozen starting baseline was 236 passed, 3 skipped, 3 deselected. Live Ollama/WSL integrations were not rerun for static Phase 5C.
 
 The Phase 5A development baseline started from that green suite. Phase 5A adds local fixture tests for metadata parsing, static `setup.py`, source/test roots, function discovery, safety limits, deterministic JSON, and inspection CLI isolation. Its validation result is recorded in `docs/phase_reports/phase-5a.md`.
 
 ## Known Limitations
 
-Generation scope is one standalone file and one top-level function. No package/method context, connection from prepared environments to generation, external specification, equivalent-mutant classification, or source repair exists. Prompt context is character bounded. PASS, coverage, and mutation score are distinct evidence, never semantic correctness proofs. Generated tests are untrusted; subprocess timeouts, venvs, and WSL workspaces are not a security sandbox.
+Generation scope is one standalone file and one top-level function. Phase 5C selects package context separately; it is not yet connected to generation. No method context, external specification, equivalent-mutant classification, or source repair exists. Prompt context is character bounded. PASS, coverage, and mutation score are distinct evidence, never semantic correctness proofs. Generated tests are untrusted; subprocess timeouts, venvs, and WSL workspaces are not a security sandbox.
 
 Phase 5A discovers dependency declarations and layout but does not resolve or install dependencies, interpret lockfile solver semantics, execute target code, select cross-file context, or run generation against a repository. Dynamic `setup.py` values remain warnings. The source scan is bounded to 2 MiB per file and 10,000 Python files by default; excluded directories and directory symlinks are not traversed.
 
@@ -124,7 +130,11 @@ The WSL backend's distribution name is fixed in code and differs from this PC's 
 
 ## Recommended Next Phase
 
-Phase 5C — Cross-file Dependency and Context Selection: use inspected repository structure to choose target functions and bounded cross-file context without starting repository test generation. Address source/accepted-file integrity and containment before broad untrusted-repository trials. Repository test generation remains later work.
+Phase 5D — Repository-Scale End-to-End Pilot: combine a verified copied environment and static ContextBundle with generation and execution, while addressing source/accepted-file integrity and containment before broad untrusted-repository trials.
+
+## Phase 5C Handoff
+
+Context selection uses no new dependency or target subprocess. It accepts an original repository or unchanged copy because the profile, target, items, and hashes use project-relative paths. Its module index comes only from `ProjectProfile.modules`; duplicate module names remain ambiguous. Top-level symbols include sync/async functions, classes, assignments, and annotated assignments; methods and nested declarations are not indexed. References include decorators, defaults, annotations, and bodies with conservative local-variable filtering. Direct imports, aliases, relative imports, and module attributes are resolved only when an unambiguous local declaration exists. Star imports, unknown globals, malformed/oversized support modules, and dynamic lookup remain recorded uncertainty. External imports are classified as stdlib or third-party/unknown without inspecting installed source. Selection priority is target, relevant imports, direct same-module, direct imported symbols/module attributes, then recursive declarations; ties use path, line, and symbol. No declaration is truncated. The defaults are 32,000 characters, 8 files, 24 items, and depth 2. The bundle hash excludes absolute roots and elapsed time; elapsed selection time is saved separately. Context selection does not call PromptBuilder or generate tests.
 
 ## Phase 5B Handoff
 

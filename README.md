@@ -1,8 +1,9 @@
-# AutoTest — Phase 5B target environments and Phase 4B test generation
+# AutoTest — Phase 5C static context and Phase 4B test generation
 
 AutoTest is a research prototype that asks a local large language model to generate pytest
 tests for a selected Python function. Phase 5A adds static repository inspection; Phase 5B plans
 and prepares copied, isolated target environments without running repository tests.
+Phase 5C selects bounded, cross-file source evidence for one project function without executing it.
 Phase 4B adds separately opt-in mutation-guided generation
 after the frozen generation, repair, coverage, and Phase 4A evaluation pipeline has produced a
 passing cumulative suite:
@@ -31,6 +32,8 @@ process with a configurable timeout.
   immutable `EnvironmentPlan` without installing packages or writing to the repository.
 - `environment_provisioner.py` copies a bounded repository into a fresh workspace, creates a
   venv, installs validated dependencies and pinned runner tools, and records integrity evidence.
+- `context_selector.py` builds a target-centered static symbol/import graph and a portable
+  `ContextBundle` from a Phase 5A profile; it does not use the Phase 5B environment.
 - `prompt_builder.py` creates a deterministic, constrained pytest prompt.
 - `llm/base.py` defines the provider-neutral generation interface.
 - `llm/ollama_provider.py` calls Ollama's `/api/generate` REST endpoint with `urllib.request`.
@@ -152,6 +155,43 @@ Mutmut, Ollama packages, and AutoTest itself are not installed there. **Phase 5B
 original checkout by working from a copied workspace, but a Python virtual environment is not
 a security sandbox.** It does not contain hostile package installation code or future target
 execution; use a disposable external sandbox for untrusted projects.
+
+## Phase 5C: select static cross-file context
+
+Choose one top-level sync or async function by project-relative file path and exact name:
+
+```powershell
+uv run python -m autotest.main `
+    --select-context tests/fixtures/projects/context_project `
+    --context-target src/shop/pricing.py:calculate_total `
+    --context-output-root workspace/context_bundles
+```
+
+The selector reuses `ProjectProfile` source roots, modules, and test-module flags. It indexes
+top-level functions, classes, and assignments; extracts references from the target body,
+annotations, defaults, and decorators; and selects relevant import statements, same-module
+declarations, and unambiguous local cross-file declarations. It handles direct/from imports,
+aliases, module attributes, and relative imports. Supporting declarations are expanded to a
+default depth of two (target=0, direct=1, recursive=2). Cycles are bounded by stable declaration
+identity. Builtins are filtered; standard-library and unknown third-party imports remain external
+evidence, not included source. Star imports, missing/ambiguous symbols, dynamic lookup, and
+unbound globals are recorded as unresolved rather than guessed.
+
+`ContextBundle` stores exact, untruncated declaration text and line ranges, selection reasons,
+dependency edges, external/unresolved references, budget omissions, selected-source hashes, and
+a deterministic portable SHA-256. Defaults are 32,000 source characters, 8 files, 24 items, and
+depth 2. Set `--context-max-chars`, `--context-max-files`, `--context-max-items`, or
+`--context-max-depth` to change them. A target exceeding the character budget is an error;
+optional items are skipped whole with an omission reason. Every run creates a fresh directory
+outside the target project with `context_bundle.json`, deterministic evidence-only `context.txt`,
+and separate `selection_metrics.json` for elapsed time. Complete or partial selection exits 0;
+invalid targets and infrastructure errors exit 2.
+
+Context selection makes **no LLM call, target import, test run, dependency installation, or
+environment provision**. It does not require a prepared Phase 5B environment. The graph is
+target-centered static evidence, not a whole-program call graph or type inference. Methods,
+nested targets, arbitrary package re-exports, dynamic imports, and external package source are
+not resolved; existing repository tests are not selected as implementation context.
 
 Install the locked project environment:
 
@@ -497,8 +537,9 @@ uv run pytest -m "mutation and ollama" `
 
 ## Current limitations
 
-Phase 4B supports one standalone Python file and one top-level sync or async function. It does not
-prepare arbitrary repository dependencies, analyze methods or cross-file context, verify test
+Phase 4B generation supports one standalone Python file and one top-level sync or async function.
+Phase 5C can select cross-file context but does not yet feed it into generation. AutoTest does not
+prepare arbitrary repository dependencies, analyze methods, verify test
 oracles against an external specification, automatically identify equivalent mutants, repair
 source or mutants, or provide OS/container sandboxing. Mutation requires a separately provisioned
 Ubuntu 22.04 WSL environment and currently supports only pinned Mutmut 3.7.0. Accepted-test prompt

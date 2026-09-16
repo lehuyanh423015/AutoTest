@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
+import secrets
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
 from autotest.artifact_store import ArtifactStore
+from autotest.context_selector import (
+    ContextSelectionError,
+    ContextSelectionPolicy,
+    ContextSelector,
+    ContextTarget,
+)
 from autotest.coverage_engine import CoverageEngine, CoverageSessionResult, CoverageStopReason
 from autotest.coverage_runner import CoverageRunner
 from autotest.environment_planner import (
@@ -95,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prepare-environment", type=Path, help="Provision a copied target environment"
     )
+    parser.add_argument("--select-context", type=Path, help="Statically select target context")
+    parser.add_argument("--context-target", help="Project-relative Python file:function")
+    parser.add_argument(
+        "--context-output-root", type=Path, default=Path("workspace/context_bundles")
+    )
+    parser.add_argument("--context-max-chars", type=_positive_int, default=32_000)
+    parser.add_argument("--context-max-files", type=_positive_int, default=8)
+    parser.add_argument("--context-max-items", type=_positive_int, default=24)
+    parser.add_argument("--context-max-depth", type=_non_negative_int, default=2)
     parser.add_argument("--target-python", type=Path, help="Explicit local CPython interpreter")
     parser.add_argument(
         "--environment-output-root",
@@ -387,17 +406,26 @@ def _print_target_environment(result: TargetEnvironment) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    static_modes = [args.inspect_project, args.plan_environment, args.prepare_environment]
+    static_modes = [
+        args.inspect_project,
+        args.plan_environment,
+        args.prepare_environment,
+        args.select_context,
+    ]
     if sum(mode is not None for mode in static_modes) > 1:
-        parser.error("Inspection, environment planning, and preparation modes are exclusive")
+        parser.error("Inspection, environment, and context-selection modes are exclusive")
     if args.inspect_project is None and args.profile_output is not None:
         parser.error("--profile-output requires --inspect-project")
     if args.inspect_project is not None:
         if args.file is not None or args.function is not None:
             parser.error("--inspect-project cannot be combined with --file or --function")
-    elif args.plan_environment is not None or args.prepare_environment is not None:
+    elif (
+        args.plan_environment is not None
+        or args.prepare_environment is not None
+        or args.select_context is not None
+    ):
         if args.file is not None or args.function is not None:
-            parser.error("Environment modes cannot be combined with --file or --function")
+            parser.error("Static modes cannot be combined with --file or --function")
     else:
         if args.file is None or args.function is None:
             parser.error("--file and --function are required unless a static mode is used")
@@ -405,12 +433,75 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.target_python is not None or args.environment_offline
     ):
         parser.error("Environment options require --plan-environment or --prepare-environment")
+    if args.select_context is None and args.context_target is not None:
+        parser.error("--context-target requires --select-context")
+    if args.select_context is not None:
+        if args.context_target is None:
+            parser.error("--context-target is required with --select-context")
+        if args.target_python is not None or args.environment_offline:
+            parser.error("Environment options cannot be used with --select-context")
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
 
     try:
+        if args.select_context is not None:
+            profile = ProjectInspector().inspect(args.select_context)
+            target = ContextTarget.parse(args.context_target)
+            policy = ContextSelectionPolicy(
+                args.context_max_chars,
+                args.context_max_files,
+                args.context_max_items,
+                args.context_max_depth,
+            )
+            selection_started = time.perf_counter()
+            bundle = ContextSelector().select(profile.root, profile, target, policy)
+            selection_seconds = time.perf_counter() - selection_started
+            output_root = args.context_output_root.resolve()
+            if output_root == profile.root or output_root.is_relative_to(profile.root):
+                raise ContextSelectionError(
+                    "Context output root must be outside the target project."
+                )
+            output_root.mkdir(parents=True, exist_ok=True)
+            for _ in range(10):
+                name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                directory = output_root / f"{name}-{secrets.token_hex(3)}"
+                try:
+                    directory.mkdir(exist_ok=False)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise ContextSelectionError("Could not reserve a fresh context directory.")
+            with (directory / "context_bundle.json").open(
+                "x", encoding="utf-8", newline="\n"
+            ) as file:
+                file.write(bundle.to_json())
+            with (directory / "context.txt").open("x", encoding="utf-8", newline="\n") as file:
+                file.write(bundle.render())
+            with (directory / "selection_metrics.json").open(
+                "x", encoding="utf-8", newline="\n"
+            ) as file:
+                file.write(
+                    json.dumps({"selection_duration_seconds": selection_seconds}, indent=2) + "\n"
+                )
+            print(f"Project: {profile.project_name}")
+            print(f"Target: {target.file.as_posix()}:{target.function}")
+            print(f"Context selection: {bundle.status}")
+            print(f"Selected files: {len(bundle.selected_file_sha256)} / {policy.max_files}")
+            print(f"Selected items: {len(bundle.items)} / {policy.max_items}")
+            print(f"Context characters: {bundle.context_chars} / {policy.max_chars}")
+            local_dependencies = (
+                bundle.direct_local_dependencies + bundle.recursive_local_dependencies
+            )
+            print(f"Local dependencies: {local_dependencies}")
+            print(f"External references: {len(bundle.external_references)}")
+            print(f"Unresolved references: {len(bundle.unresolved_references)}")
+            print(f"Omitted context: {len(bundle.omitted_items)}")
+            print(f"Bundle: {directory / 'context_bundle.json'}")
+            print(f"Rendered context: {directory / 'context.txt'}")
+            return 0
         if args.inspect_project is not None:
             profile = ProjectInspector().inspect(args.inspect_project)
             output = args.profile_output
@@ -579,7 +670,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             return 2
         return _exit_code(session.attempts[-1].run_result)
-    except AutoTestError as exc:
+    except (AutoTestError, ContextSelectionError, OSError) as exc:
         LOGGER.error("%s", exc, exc_info=args.debug)
         return 2
 

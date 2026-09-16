@@ -6,6 +6,13 @@ from autotest.artifact_store import (
     CoverageRoundArtifacts,
     RunArtifacts,
 )
+from autotest.context_selector import (
+    ContextBundle,
+    ContextSelectionError,
+    ContextSelectionPolicy,
+    ContextSelector,
+    ContextTarget,
+)
 from autotest.coverage_engine import (
     CoverageEngine,
     CoverageRoundResult,
@@ -59,6 +66,11 @@ __all__ = [
     "CoverageRunner",
     "CoverageSessionResult",
     "CoverageStopReason",
+    "ContextBundle",
+    "ContextSelectionError",
+    "ContextSelectionPolicy",
+    "ContextSelector",
+    "ContextTarget",
     "DependencyDeclaration",
     "DependencyStrategy",
     "EnvironmentPlan",
