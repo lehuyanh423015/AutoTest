@@ -1,8 +1,9 @@
-# AutoTest — Phase 4A mutation testing evaluation
+# AutoTest — Phase 4B mutation-guided test generation
 
 AutoTest is a research prototype that asks a local large language model to generate pytest
-tests for a selected Python function. Phase 4A adds opt-in mutation-quality evaluation after the
-frozen generation, repair, and coverage pipeline has produced a final passing cumulative suite:
+tests for a selected Python function. Phase 4B adds separately opt-in mutation-guided generation
+after the frozen generation, repair, coverage, and Phase 4A evaluation pipeline has produced a
+passing cumulative suite:
 
 ```text
 standalone .py file -> AST analysis -> deterministic prompt -> Ollama
@@ -11,6 +12,7 @@ standalone .py file -> AST analysis -> deterministic prompt -> Ollama
                     -> line/branch coverage baseline -> target reached?
                     -> additional test -> cumulative execution/repair -> coverage comparison
                     -> final passing suite -> isolated WSL/Mutmut evaluation -> mutation metrics
+                    -> surviving-mutant diffs -> additional test -> transactional comparison
 ```
 
 The current scope is one standalone Python file and one named top-level function at a time.
@@ -34,7 +36,8 @@ process with a configurable timeout.
   function's lines and branch arcs.
 - `coverage_engine.py` owns the bounded, transactional supplementary-test loop.
 - `mutation_runner.py` defines the backend boundary and invokes pinned Mutmut through WSL.
-- `main.py` reports execution, coverage, and mutation outcomes separately.
+- `mutation_feedback.py` owns the bounded, transactional survivor-feedback loop.
+- `main.py` reports execution, coverage, mutation, and mutation-feedback outcomes separately.
 
 The pytest subprocess runs in the controlled generated-test directory and uses that directory as
 its explicit pytest root. The target file's parent directory is prepended to `PYTHONPATH` in the
@@ -73,7 +76,7 @@ ollama pull qwen2.5-coder:14b
 If Ollama already runs as a Windows service, a separate `ollama serve` process is unnecessary.
 The default endpoint is `http://localhost:11434`.
 
-## Run the Phase 4A CLI
+## Run the Phase 4B CLI
 
 From the repository root:
 
@@ -90,9 +93,12 @@ Useful options include `--model`, `--ollama-url`, `--output-dir`, `--timeout`,
 `--ollama-timeout`, `--temperature`, `--max-repair-attempts`, `--max-coverage-rounds`, and
 `--coverage-target`. Phase 4A adds `--mutation`, `--mutation-timeout`, and `--mutation-venv`;
 mutation is off by default, its outer timeout defaults to 300 seconds, and its isolated WSL
-environment defaults to `/home/ubuntu/autotest-mutation-env`. Both bounded-loop limits default to `3`;
-the coverage target defaults to
-`100`. A repair limit of `0` reproduces direct Phase 1 generation/execution. A coverage-round
+environment defaults to `/home/ubuntu/autotest-mutation-env`. Phase 4B adds
+`--mutation-feedback`, `--max-mutation-rounds`, and `--max-mutants-per-round`.
+`--mutation-feedback` implies mutation evaluation; `--mutation` alone remains Phase 4A
+evaluation-only behavior and never sends survivors to the LLM. Repair, coverage, and mutation
+round limits default to `3`; the per-round survivor limit defaults to `5`; the coverage target
+defaults to `100`. A repair limit of `0` reproduces direct Phase 1 generation/execution. A coverage-round
 limit of `0` still measures the baseline but makes no coverage-generation request:
 
 ```powershell
@@ -106,6 +112,21 @@ uv run python -m autotest.main `
 `--max-coverage-rounds` must be non-negative. `--coverage-target` must be from 0 through 100 and
 applies to line coverage and branch coverage when branches exist. `--output-dir` selects the
 immutable artifact root and defaults to `workspace/runs/`, which is ignored by Git.
+
+Run mutation feedback explicitly:
+
+```powershell
+uv run python -m autotest.main `
+    --file tests/fixtures/mutation_feedback_suite/fee.py `
+    --function calculate_fee `
+    --mutation-feedback `
+    --max-mutation-rounds 3 `
+    --max-mutants-per-round 5 `
+    --mutation-timeout 300
+```
+
+`--max-mutation-rounds 0` still runs and preserves the baseline mutation evaluation but performs
+no feedback generation. `--max-mutants-per-round` must be at least one.
 
 ## Coverage guidance and acceptance
 
@@ -177,6 +198,37 @@ aggregate difference from the tool total is recorded conservatively as `unreport
 With AutoTest's type-check command disabled, mutants outside the selected-function run remain not
 checked and do not contribute to the selected total or score.
 
+## Mutation feedback and acceptance
+
+Phase 4B treats the Phase 4A result as Round 0. A completed baseline with no survivors stops at
+`ALL_MUTANTS_KILLED` with zero feedback calls. Tool unavailability, timeout, error, or no
+applicable mutants stops safely without generation. For a completed baseline with survivors,
+AutoTest runs the supported Mutmut 3.7.0 commands `mutmut results --all true` and
+`mutmut show <mutant-id>` inside the existing isolated workspace. It parses full stable IDs,
+sorts them deterministically, and sends at most the configured number of exact diffs to the LLM.
+Raw results and complete selected diffs remain artifacts even when prompt context is bounded to
+12,000 characters.
+
+The prompt contains line-numbered original source, immutable accepted-test context, survivor IDs
+and diffs, and asks for one additional pytest module that distinguishes defensible original
+behavior from the artificial changes. It warns that mutants can be equivalent and explicitly
+forbids inventing an oracle merely to improve the score.
+
+Each candidate first runs against the original source with every accepted test. Frozen Phase 2
+repair may modify only that current candidate. A passing candidate is coverage-measured, but it
+does not need a coverage gain: unchanged 100% coverage can accompany a valid mutation gain.
+Coverage regression rejects the candidate. A fresh isolated mutation evaluation then must have
+the same source/config hashes, backend version, target, and full mutant-ID universe. Acceptance
+requires at least one former survivor to become killed, no former killed mutant to become a
+survivor, no score regression, and no coverage regression. Otherwise the candidate is preserved
+but excluded from the final cumulative suite. Stops are bounded and explicit, including
+`NO_MUTATION_IMPROVEMENT`, `MUTATION_REGRESSION`, `MUTANT_SET_CHANGED`, and infrastructure
+errors.
+
+Mutation-score improvement is stronger fault-detection evidence than coverage improvement alone,
+but it is not proof of semantic correctness. Equivalent mutants may limit the achievable score,
+and generated tests can still encode incorrect or overfitted oracles.
+
 ## Repair policy
 
 `ERROR` and `TIMEOUT` normally receive a repair attempt. ERROR guidance targets invalid syntax,
@@ -244,6 +296,34 @@ The exact raw export is authoritative. Normalized categories, WSL tool versions,
 hashes, duration, and infrastructure errors are stored separately. No Mutmut cache is shared
 between research runs.
 
+Phase 4B preserves that subtree as the baseline and adds:
+
+```text
+mutation-feedback/
+├── baseline/survivors/
+│   ├── survivors_raw.txt
+│   └── mutant-*.txt
+└── round-001/
+    ├── survivors/survivors_raw.txt
+    ├── survivors/mutant-*.txt
+    ├── prompt.txt
+    ├── raw_response.txt
+    ├── generated_test.py
+    ├── result.json
+    ├── candidate/attempt-*/...
+    ├── coverage/...
+    └── mutation/
+        ├── mutation_result.json
+        ├── mutmut_raw_stats.json
+        ├── survivors/...
+        └── workspace/...
+```
+
+Root `result.json` keeps the Phase 4A `mutation` object unchanged and adds a separate
+`mutation_feedback` object containing baseline/final scores and counts, score gain, survivor
+reduction, round and acceptance history, LLM/repair call counts, generation/execution/mutation
+timing, and final line/branch coverage.
+
 Attempt 0 is always the initial generation; later attempts are repairs. Files use exclusive UTF-8
 writes, so completed attempts are never overwritten. Every attempt records execution output,
 status, timing, failure category, test/assert counts, quality warnings, and prompt/test SHA-256
@@ -307,12 +387,27 @@ backend integration with:
 uv run pytest -m mutation tests/test_mutation_integration.py -v
 ```
 
+Run the deterministic real-Mutmut feedback improvement integration without Ollama:
+
+```powershell
+uv run pytest -m mutation `
+    tests/test_mutation_feedback_integration.py::test_live_mutmut_feedback_improves_boundary_suite -v
+```
+
+Run the separate real Ollama plus Mutmut feedback integration when both services are available:
+
+```powershell
+$env:AUTOTEST_RUN_OLLAMA_MUTATION_FEEDBACK = "1"
+uv run pytest -m "mutation and ollama" `
+    tests/test_mutation_feedback_integration.py::test_live_ollama_and_mutmut_feedback_is_transactional -v
+```
+
 ## Current limitations
 
-Phase 4A supports one standalone Python file and one top-level sync or async function. It does not
+Phase 4B supports one standalone Python file and one top-level sync or async function. It does not
 prepare arbitrary repository dependencies, analyze methods or cross-file context, verify test
-oracles against an external specification, identify equivalent mutants, use mutation feedback for
-generation, or provide OS/container sandboxing. Mutation requires a separately provisioned
+oracles against an external specification, automatically identify equivalent mutants, repair
+source or mutants, or provide OS/container sandboxing. Mutation requires a separately provisioned
 Ubuntu 22.04 WSL environment and currently supports only pinned Mutmut 3.7.0. Accepted-test prompt
 context is character-bounded,
 not repository-scale context selection. AutoTest never repairs or modifies target source code.

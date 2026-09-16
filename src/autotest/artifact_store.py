@@ -18,7 +18,11 @@ from autotest.test_runner import TestRunResult
 
 if TYPE_CHECKING:
     from autotest.coverage_engine import CoverageRoundResult, CoverageSessionResult
-    from autotest.mutation_runner import MutationResult
+    from autotest.mutation_feedback import (
+        MutationFeedbackRoundResult,
+        MutationFeedbackSessionResult,
+    )
+    from autotest.mutation_runner import MutationResult, SurvivorEvidence
     from autotest.repair_engine import RepairSessionResult, TestAttempt
 
 _RUN_ID_PATTERN = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{6}")
@@ -74,6 +78,19 @@ class MutationArtifacts:
     stderr_file: Path
     config_dir: Path
     workspace: Path
+
+
+@dataclass(frozen=True, slots=True)
+class MutationFeedbackRoundArtifacts:
+    """Immutable locations for one mutation-guided supplementary candidate."""
+
+    round_index: int
+    round_dir: Path
+    survivors_dir: Path
+    prompt_file: Path
+    raw_response_file: Path
+    generated_test_file: Path
+    result_file: Path
 
 
 class ArtifactStore:
@@ -205,7 +222,11 @@ class ArtifactStore:
 
     def create_mutation(self, run: RunArtifacts) -> MutationArtifacts:
         """Reserve a fresh mutation subtree for this unique run."""
-        mutation_dir = run.run_dir / "mutation"
+        return self.create_mutation_at(run.run_dir / "mutation")
+
+    def create_mutation_at(self, mutation_dir: Path | str) -> MutationArtifacts:
+        """Reserve an isolated mutation evaluation at an explicit artifact location."""
+        mutation_dir = Path(mutation_dir).resolve()
         config_dir = mutation_dir / "config"
         try:
             mutation_dir.mkdir(exist_ok=False)
@@ -225,6 +246,150 @@ class ArtifactStore:
             config_dir=config_dir,
             workspace=mutation_dir / "workspace",
         )
+
+    def create_mutation_feedback_baseline(self, run: RunArtifacts) -> Path:
+        """Reserve the Round 0 survivor-evidence directory."""
+        directory = run.run_dir / "mutation-feedback" / "baseline" / "survivors"
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise ArtifactError(
+                f"Refusing to overwrite mutation-feedback baseline: {directory}"
+            ) from exc
+        except OSError as exc:
+            raise ArtifactError(f"Could not create mutation-feedback baseline: {exc}") from exc
+        return directory
+
+    def create_mutation_feedback_round(
+        self, run: RunArtifacts, round_index: int
+    ) -> MutationFeedbackRoundArtifacts:
+        """Reserve one deterministic mutation-feedback round."""
+        if round_index < 1:
+            raise ArtifactError("Mutation feedback round index must be at least one.")
+        round_dir = run.run_dir / "mutation-feedback" / f"round-{round_index:03d}"
+        survivors_dir = round_dir / "survivors"
+        try:
+            survivors_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise ArtifactError(
+                f"Refusing to overwrite mutation-feedback round: {round_dir}"
+            ) from exc
+        except OSError as exc:
+            raise ArtifactError(f"Could not create mutation-feedback round: {exc}") from exc
+        return MutationFeedbackRoundArtifacts(
+            round_index,
+            round_dir,
+            survivors_dir,
+            round_dir / "prompt.txt",
+            round_dir / "raw_response.txt",
+            round_dir / "generated_test.py",
+            round_dir / "result.json",
+        )
+
+    def save_survivor_evidence(self, directory: Path, evidence: SurvivorEvidence) -> None:
+        """Persist complete raw results and every selected exact diff immutably."""
+        from autotest.mutation_runner import safe_mutant_artifact_name
+
+        self._write_new_text(directory / "survivors_raw.txt", evidence.raw_results)
+        for index, survivor in enumerate(evidence.selected_survivors, start=1):
+            self._write_new_text(
+                directory / safe_mutant_artifact_name(survivor.mutant_id, index),
+                survivor.diff,
+            )
+
+    def save_mutation_feedback_prompt(
+        self, artifacts: MutationFeedbackRoundArtifacts, prompt: str
+    ) -> None:
+        self._write_new_text(artifacts.prompt_file, prompt)
+
+    def save_mutation_feedback_response(
+        self, artifacts: MutationFeedbackRoundArtifacts, response: str
+    ) -> None:
+        self._write_new_text(artifacts.raw_response_file, response)
+
+    def save_mutation_feedback_candidate(
+        self, artifacts: MutationFeedbackRoundArtifacts, code: str
+    ) -> Path:
+        self._write_new_text(artifacts.generated_test_file, code)
+        return artifacts.generated_test_file
+
+    def save_mutation_feedback_round_result(
+        self,
+        artifacts: MutationFeedbackRoundArtifacts,
+        result: MutationFeedbackRoundResult,
+    ) -> dict[str, Any]:
+        """Persist one mutation-feedback decision and its comparative evidence."""
+        execution = result.candidate_execution
+        metadata: dict[str, Any] = {
+            "round_index": result.round_index,
+            "accepted": result.accepted,
+            "stop_reason": result.stop_reason.value if result.stop_reason is not None else None,
+            "selected_survivor_ids": [
+                item.mutant_id for item in result.evidence_before.selected_survivors
+            ],
+            "newly_killed_ids": list(result.newly_killed_ids),
+            "regressed_ids": list(result.regressed_ids),
+            "mutation_before": self._mutation_metadata(result.mutation_before),
+            "mutation_after": (
+                self._mutation_metadata(result.mutation_after)
+                if result.mutation_after is not None
+                else None
+            ),
+            "coverage_before": self._coverage_summary(result.coverage_before),
+            "coverage_after": (
+                self._coverage_summary(result.coverage_after)
+                if result.coverage_after is not None
+                else None
+            ),
+            "generation": {
+                "duration_seconds": result.generation_duration_seconds,
+                "test_function_count": (
+                    result.structure.test_function_count if result.structure is not None else 0
+                ),
+                "assert_count": result.structure.assert_count
+                if result.structure is not None
+                else 0,
+                "quality_warnings": list(result.quality_warnings),
+            },
+            "candidate_execution": (
+                {
+                    "initial_status": execution.initial_status.value,
+                    "final_status": execution.final_status.value,
+                    "repair_count": execution.repair_count,
+                    "stop_reason": execution.stopped_reason.value,
+                    "final_test_file": str(execution.attempts[-1].test_file),
+                }
+                if execution is not None
+                else None
+            ),
+            "files": {
+                "survivors_raw": "survivors/survivors_raw.txt",
+                "prompt": artifacts.prompt_file.name,
+                "raw_response": (
+                    artifacts.raw_response_file.name
+                    if artifacts.raw_response_file.exists()
+                    else None
+                ),
+                "generated_test": (
+                    artifacts.generated_test_file.name
+                    if artifacts.generated_test_file.exists()
+                    else None
+                ),
+            },
+            "hashes": {
+                "prompt_sha256": self._sha256(artifacts.prompt_file),
+                "generated_test_sha256": (
+                    self._sha256(artifacts.generated_test_file)
+                    if artifacts.generated_test_file.exists()
+                    else None
+                ),
+            },
+        }
+        self._write_new_text(
+            artifacts.result_file,
+            f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n",
+        )
+        return metadata
 
     def save_mutation_result(
         self, artifacts: MutationArtifacts, result: MutationResult
@@ -427,6 +592,10 @@ class ArtifactStore:
         mutation_timeout_seconds: float | None = None,
         mutation_result: MutationResult | None = None,
         mutation_skipped_reason: str | None = None,
+        mutation_feedback_enabled: bool | None = None,
+        mutation_feedback_session: MutationFeedbackSessionResult | None = None,
+        max_mutation_rounds: int | None = None,
+        max_mutants_per_round: int | None = None,
     ) -> dict[str, Any]:
         """Persist the root summary for a complete bounded repair session."""
         initial_attempt = session.attempts[0]
@@ -520,6 +689,13 @@ class ArtifactStore:
                 metadata["mutation"]["final_branch_coverage"] = (
                     final_coverage.branch_coverage_percent if final_coverage is not None else None
                 )
+        if mutation_feedback_enabled is not None:
+            metadata["mutation_feedback"] = self._mutation_feedback_metadata(
+                mutation_feedback_enabled,
+                mutation_feedback_session,
+                max_mutation_rounds=max_mutation_rounds,
+                max_mutants_per_round=max_mutants_per_round,
+            )
         self._write_new_text(
             run.result_file,
             f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n",
@@ -555,6 +731,98 @@ class ArtifactStore:
             "workspace": str(result.workspace) if result.workspace is not None else None,
             "hashes": dict(result.hashes),
             "error_message": result.error_message,
+        }
+
+    def _mutation_feedback_metadata(
+        self,
+        enabled: bool,
+        session: MutationFeedbackSessionResult | None,
+        *,
+        max_mutation_rounds: int | None,
+        max_mutants_per_round: int | None,
+    ) -> dict[str, Any]:
+        if session is None:
+            return {
+                "enabled": enabled,
+                "max_rounds": max_mutation_rounds,
+                "max_mutants_per_round": max_mutants_per_round,
+                "rounds_used": 0,
+                "accepted_rounds": 0,
+                "stop_reason": None,
+                "skipped_reason": "NOT_REQUESTED" if not enabled else "PIPELINE_NOT_ELIGIBLE",
+            }
+        initial = session.baseline_mutation
+        final = session.final_mutation
+        generation_time = sum(item.generation_duration_seconds for item in session.rounds)
+        execution_time = sum(
+            item.candidate_execution.total_execution_seconds
+            for item in session.rounds
+            if item.candidate_execution is not None
+        )
+        mutation_time = initial.duration_seconds + sum(
+            item.mutation_after.duration_seconds
+            for item in session.rounds
+            if item.mutation_after is not None
+        )
+        return {
+            "enabled": enabled,
+            "max_rounds": max_mutation_rounds,
+            "max_mutants_per_round": max_mutants_per_round,
+            "rounds_used": len(session.rounds),
+            "accepted_rounds": session.accepted_round_count,
+            "stop_reason": session.stop_reason.value,
+            "initial": {
+                "total": initial.total_mutants,
+                "killed": initial.killed_mutants,
+                "survived": initial.survived_mutants,
+                "score_percent": initial.mutation_score_percent,
+            },
+            "final": {
+                "total": final.total_mutants,
+                "killed": final.killed_mutants,
+                "survived": final.survived_mutants,
+                "score_percent": final.mutation_score_percent,
+            },
+            "mutation_score_gain": session.mutation_score_gain,
+            "survivors_reduced": session.survivors_reduced,
+            "all_mutants_killed": final.survived_mutants == 0,
+            "accepted_test_files": [str(path) for path in session.accepted_test_files],
+            "round_history": [
+                {
+                    "round": item.round_index,
+                    "accepted": item.accepted,
+                    "stop_reason": (
+                        item.stop_reason.value if item.stop_reason is not None else None
+                    ),
+                    "survived_before": item.mutation_before.survived_mutants,
+                    "survived_after": (
+                        item.mutation_after.survived_mutants
+                        if item.mutation_after is not None
+                        else None
+                    ),
+                    "newly_killed_ids": list(item.newly_killed_ids),
+                }
+                for item in session.rounds
+            ],
+            "metrics": {
+                "initial_mutation_score": initial.mutation_score_percent,
+                "final_mutation_score": final.mutation_score_percent,
+                "mutation_score_gain": session.mutation_score_gain,
+                "initial_killed_mutants": initial.killed_mutants,
+                "final_killed_mutants": final.killed_mutants,
+                "initial_survived_mutants": initial.survived_mutants,
+                "final_survived_mutants": final.survived_mutants,
+                "survivors_reduced": session.survivors_reduced,
+                "mutation_round_count": len(session.rounds),
+                "accepted_mutation_round_count": session.accepted_round_count,
+                "mutation_feedback_llm_calls": session.feedback_llm_calls,
+                "mutation_candidate_repair_count": session.candidate_repair_count,
+                "mutation_feedback_generation_time": generation_time,
+                "candidate_execution_time": execution_time,
+                "mutation_evaluation_time": mutation_time,
+                "final_line_coverage": session.final_coverage.line_coverage_percent,
+                "final_branch_coverage": session.final_coverage.branch_coverage_percent,
+            },
         }
 
     def _coverage_session_metadata(

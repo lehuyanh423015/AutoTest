@@ -13,6 +13,11 @@ from autotest.coverage_engine import CoverageEngine, CoverageSessionResult, Cove
 from autotest.coverage_runner import CoverageRunner
 from autotest.errors import AutoTestError
 from autotest.llm.ollama_provider import OllamaConfig, OllamaProvider
+from autotest.mutation_feedback import (
+    MutationFeedbackEngine,
+    MutationFeedbackSessionResult,
+    MutationFeedbackStopReason,
+)
 from autotest.mutation_runner import (
     DEFAULT_MUTATION_VENV,
     MutationResult,
@@ -33,6 +38,13 @@ def _non_negative_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from exc
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be greater than or equal to zero")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = _non_negative_int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be greater than or equal to one")
     return parsed
 
 
@@ -104,6 +116,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evaluate the final passing suite with the external WSL Mutmut backend",
     )
     parser.add_argument(
+        "--mutation-feedback",
+        action="store_true",
+        help="Enable mutation evaluation and bounded mutation-guided test generation",
+    )
+    parser.add_argument(
+        "--max-mutation-rounds",
+        type=_non_negative_int,
+        default=3,
+        help="Maximum mutation-guided additions after the baseline (default: 3)",
+    )
+    parser.add_argument(
+        "--max-mutants-per-round",
+        type=_positive_int,
+        default=5,
+        help="Maximum deterministically selected survivor diffs per round (default: 5)",
+    )
+    parser.add_argument(
         "--mutation-timeout",
         type=_positive_number,
         default=300.0,
@@ -126,6 +155,7 @@ def _print_result(
     coverage: CoverageSessionResult | None,
     mutation_requested: bool,
     mutation: MutationResult | None,
+    mutation_feedback: MutationFeedbackSessionResult | None,
 ) -> None:
     final_attempt = session.attempts[-1]
     result = final_attempt.run_result
@@ -197,10 +227,48 @@ def _print_result(
             print(f"Mutation error: {mutation.error_message}")
     elif mutation_requested:
         print("Mutation: not run because the final accepted suite was not available and passing")
+    if mutation_feedback is not None:
+        baseline = mutation_feedback.baseline_mutation
+        final = mutation_feedback.final_mutation
+        print("Mutation feedback:")
+        print(
+            f"Baseline: {baseline.killed_mutants} killed, "
+            f"{baseline.survived_mutants} survived, "
+            f"score {_score_text(baseline.mutation_score_percent)}"
+        )
+        for item in mutation_feedback.rounds:
+            status = (
+                item.candidate_execution.final_status.value
+                if item.candidate_execution is not None
+                else "NOT EXECUTED"
+            )
+            after_score = (
+                item.mutation_after.mutation_score_percent
+                if item.mutation_after is not None
+                else None
+            )
+            after_survivors = (
+                item.mutation_after.survived_mutants if item.mutation_after is not None else "N/A"
+            )
+            print(
+                f"Round {item.round_index}: selected "
+                f"{len(item.evidence_before.selected_survivors)}, candidate {status}, "
+                f"score {_score_text(after_score)}, survivors {after_survivors}, "
+                f"accepted {'YES' if item.accepted else 'NO'}"
+            )
+        gain = mutation_feedback.mutation_score_gain
+        gain_text = "N/A" if gain is None else f"{gain:+.2f}%"
+        print(f"Final mutation score: {_score_text(final.mutation_score_percent)}")
+        print(f"Mutation gain: {gain_text}")
+        print(f"Mutation feedback stop reason: {mutation_feedback.stop_reason.value}")
     print("pytest stdout:")
     print(result.stdout.rstrip() or "(empty)")
     print("pytest stderr:")
     print(result.stderr.rstrip() or "(empty)")
+
+
+def _score_text(score: float | None) -> str:
+    return "N/A" if score is None else f"{score:.2f}%"
 
 
 def _exit_code(result: TestRunResult) -> int:
@@ -254,26 +322,51 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_repair_attempts=args.max_repair_attempts,
             ).run(function, run, session)
         mutation_result = None
+        mutation_feedback_session = None
         coverage_failed = coverage_session is not None and coverage_session.stop_reason in (
             CoverageStopReason.COVERAGE_ERROR,
             CoverageStopReason.PIPELINE_ERROR,
         )
-        if args.mutation and session.final_status is TestStatus.PASS and not coverage_failed:
+        mutation_requested = args.mutation or args.mutation_feedback
+        mutation_backend = None
+        if mutation_requested and session.final_status is TestStatus.PASS and not coverage_failed:
             mutation_artifacts = artifact_store.create_mutation(run)
             accepted_tests = (
                 coverage_session.accepted_test_files
                 if coverage_session is not None
                 else (session.attempts[-1].test_file,)
             )
-            mutation_result = WSLMutmutBackend(
+            mutation_backend = WSLMutmutBackend(
                 timeout=args.mutation_timeout,
                 mutation_venv=args.mutation_venv,
-            ).run(
+            )
+            mutation_result = mutation_backend.run(
                 function,
                 accepted_tests,
                 mutation_artifacts.mutation_dir,
             )
             artifact_store.save_mutation_result(mutation_artifacts, mutation_result)
+            if (
+                args.mutation_feedback
+                and coverage_session is not None
+                and coverage_session.final_coverage is not None
+            ):
+                mutation_feedback_session = MutationFeedbackEngine(
+                    provider,
+                    runner,
+                    CoverageRunner(timeout=args.timeout),
+                    mutation_backend,
+                    artifact_store,
+                    max_mutation_rounds=args.max_mutation_rounds,
+                    max_mutants_per_round=args.max_mutants_per_round,
+                    max_repair_attempts=args.max_repair_attempts,
+                ).run(
+                    function,
+                    run,
+                    accepted_tests,
+                    mutation_result,
+                    coverage_session.final_coverage,
+                )
         artifact_store.save_session_result(
             run,
             function,
@@ -288,12 +381,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             coverage_session=coverage_session,
             max_coverage_rounds=args.max_coverage_rounds,
             coverage_target=args.coverage_target,
-            mutation_enabled=args.mutation,
+            mutation_enabled=mutation_requested,
             mutation_timeout_seconds=args.mutation_timeout,
             mutation_result=mutation_result,
             mutation_skipped_reason=(
-                "COVERAGE_PIPELINE_ERROR" if args.mutation and coverage_failed else None
+                "COVERAGE_PIPELINE_ERROR" if mutation_requested and coverage_failed else None
             ),
+            mutation_feedback_enabled=args.mutation_feedback,
+            mutation_feedback_session=mutation_feedback_session,
+            max_mutation_rounds=args.max_mutation_rounds,
+            max_mutants_per_round=args.max_mutants_per_round,
         )
         LOGGER.info("Final status: %s", session.final_status.value)
         LOGGER.info("Run artifacts: %s", run.run_dir)
@@ -303,8 +400,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             run.run_dir,
             session,
             coverage_session,
-            args.mutation,
+            mutation_requested,
             mutation_result,
+            mutation_feedback_session,
         )
         if coverage_failed:
             return 2
@@ -312,6 +410,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             MutationStatus.TOOL_UNAVAILABLE,
             MutationStatus.TOOL_ERROR,
             MutationStatus.TIMEOUT,
+        ):
+            return 2
+        if (
+            mutation_feedback_session is not None
+            and mutation_feedback_session.stop_reason
+            in (
+                MutationFeedbackStopReason.MUTATION_ERROR,
+                MutationFeedbackStopReason.LLM_ERROR,
+                MutationFeedbackStopReason.PIPELINE_ERROR,
+            )
+            and not (
+                mutation_feedback_session.stop_reason is MutationFeedbackStopReason.MUTATION_ERROR
+                and mutation_result is not None
+                and mutation_result.status is MutationStatus.NO_MUTANTS
+            )
         ):
             return 2
         return _exit_code(session.attempts[-1].run_result)

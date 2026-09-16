@@ -12,7 +12,9 @@ from autotest.mutation_runner import (
     MutationStatus,
     WSLMutmutBackend,
     calculate_mutation_score,
+    parse_mutmut_results,
     parse_mutmut_stats,
+    safe_mutant_artifact_name,
 )
 from autotest.project_analyzer import FunctionInfo
 
@@ -212,6 +214,26 @@ class FakeRunner:
             raw.parent.mkdir()
             raw.write_text(json.dumps(stats()), encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, "exported", "")
+        if mutmut in tail and "results" in tail:
+            output = "".join(
+                f"    sample.x_target__mutmut_{index}: {status}\n"
+                for index, status in enumerate(
+                    (
+                        "killed",
+                        "survived",
+                        "no tests",
+                        "skipped",
+                        "suspicious",
+                        "timeout",
+                        "survived",
+                        "killed",
+                    ),
+                    start=1,
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if mutmut in tail and "show" in tail:
+            return subprocess.CompletedProcess(command, 0, f"--- original\n+++ {tail[-1]}\n", "")
         raise AssertionError(f"Unexpected command: {command}")
 
 
@@ -331,3 +353,49 @@ def test_missing_virtualenv_python_names_the_absolute_executable(tmp_path: Path)
 
     assert result.status is MutationStatus.TOOL_UNAVAILABLE
     assert f"{DEFAULT_MUTATION_VENV}/bin/python" in (result.error_message or "")
+
+
+def test_parse_actual_mutmut_results_is_sorted_and_target_scoped() -> None:
+    raw = (
+        "    sample.x_target__mutmut_2: survived\n"
+        "    sample.x_other__mutmut_1: killed\n"
+        "    sample.x_target__mutmut_1: killed\n"
+    )
+
+    outcomes = parse_mutmut_results(raw, module_name="sample", function_name="target")
+
+    assert [(item.mutant_id, item.status) for item in outcomes] == [
+        ("sample.x_target__mutmut_1", "killed"),
+        ("sample.x_target__mutmut_2", "survived"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["not a result line", "sample.x_target__mutmut_1: unexpected"],
+)
+def test_parse_mutmut_results_rejects_unknown_or_malformed_output(raw: str) -> None:
+    with pytest.raises(MutationError):
+        parse_mutmut_results(raw, module_name="sample", function_name="target")
+
+
+def test_backend_extracts_bounded_survivor_diffs_with_absolute_mutmut(tmp_path: Path) -> None:
+    result, fake, function, _, _ = run_backend(tmp_path)
+
+    evidence = WSLMutmutBackend(process_runner=fake).extract_survivors(result, function, 1)
+
+    assert evidence.survivor_ids == (
+        "sample.x_target__mutmut_2",
+        "sample.x_target__mutmut_7",
+    )
+    assert [item.mutant_id for item in evidence.selected_survivors] == ["sample.x_target__mutmut_2"]
+    assert "+++ sample.x_target__mutmut_2" in evidence.selected_survivors[0].diff
+    flattened = [part for command in fake.commands for part in command]
+    assert f"{DEFAULT_MUTATION_VENV}/bin/mutmut" in flattened
+    assert "mutmut" not in flattened
+
+
+def test_unsafe_mutant_id_has_safe_deterministic_artifact_name() -> None:
+    name = safe_mutant_artifact_name("package/mod::x target?*", 2)
+
+    assert name == "mutant-002-package_mod_x_target.txt"

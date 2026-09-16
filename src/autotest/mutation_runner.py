@@ -74,6 +74,44 @@ class MutationResult:
     stderr: str = field(default="", repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class MutantOutcome:
+    """One target-function mutant and its normalized Mutmut result."""
+
+    mutant_id: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class SurvivingMutant:
+    """Supported, human-readable evidence for one surviving mutant."""
+
+    mutant_id: str
+    target_function: str
+    diff: str
+
+
+@dataclass(frozen=True, slots=True)
+class SurvivorEvidence:
+    """Complete target mutant outcomes plus bounded survivor diffs."""
+
+    outcomes: tuple[MutantOutcome, ...]
+    selected_survivors: tuple[SurvivingMutant, ...]
+    raw_results: str
+
+    @property
+    def mutant_ids(self) -> tuple[str, ...]:
+        return tuple(item.mutant_id for item in self.outcomes)
+
+    @property
+    def survivor_ids(self) -> tuple[str, ...]:
+        return tuple(item.mutant_id for item in self.outcomes if item.status == "survived")
+
+    @property
+    def killed_ids(self) -> tuple[str, ...]:
+        return tuple(item.mutant_id for item in self.outcomes if item.status == "killed")
+
+
 class MutationBackend(ABC):
     """Small boundary for replaceable external mutation engines."""
 
@@ -99,6 +137,60 @@ def calculate_mutation_score(killed: int, survived: int) -> float | None:
         raise ValueError("Mutation counts must be non-negative integers.")
     denominator = killed + survived
     return None if denominator == 0 else killed / denominator * 100.0
+
+
+_MUTMUT_RESULT_LINE = re.compile(r"^\s*(\S+):\s+(.+?)\s*$")
+_SUPPORTED_MUTANT_STATUSES = frozenset(
+    {
+        "killed",
+        "survived",
+        "no tests",
+        "skipped",
+        "suspicious",
+        "timeout",
+        "check was interrupted by user",
+        "segfault",
+        "caught by type check",
+        "not checked",
+    }
+)
+
+
+def parse_mutmut_results(
+    raw: str,
+    *,
+    module_name: str,
+    function_name: str,
+) -> tuple[MutantOutcome, ...]:
+    """Parse supported ``mutmut results --all true`` output for one selector."""
+    if not isinstance(raw, str):
+        raise MutationError("Mutmut results output must be text.")
+    prefix = f"{module_name}.x_{function_name}__mutmut_"
+    outcomes: list[MutantOutcome] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        match = _MUTMUT_RESULT_LINE.fullmatch(line)
+        if match is None:
+            raise MutationError(f"Malformed Mutmut results line: {line!r}.")
+        mutant_id, status = match.groups()
+        normalized = status.strip().lower()
+        if normalized not in _SUPPORTED_MUTANT_STATUSES:
+            raise MutationError(f"Unsupported Mutmut status {status!r} for mutant {mutant_id!r}.")
+        if not mutant_id.startswith(prefix):
+            continue
+        if mutant_id in seen:
+            raise MutationError(f"Duplicate Mutmut result for mutant {mutant_id!r}.")
+        seen.add(mutant_id)
+        outcomes.append(MutantOutcome(mutant_id, normalized))
+    return tuple(sorted(outcomes, key=lambda item: item.mutant_id))
+
+
+def safe_mutant_artifact_name(mutant_id: str, index: int) -> str:
+    """Return a deterministic filesystem-safe evidence filename."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", mutant_id).strip("._-") or "mutant"
+    return f"mutant-{index:03d}-{slug[:80]}.txt"
 
 
 def parse_mutmut_stats(
@@ -390,6 +482,68 @@ class WSLMutmutBackend(MutationBackend):
                 protected,
             )
 
+    def extract_survivors(
+        self,
+        result: MutationResult,
+        function: FunctionInfo,
+        max_mutants: int,
+    ) -> SurvivorEvidence:
+        """Discover survivors and exact diffs through supported Mutmut 3.7.0 commands."""
+        if max_mutants < 1:
+            raise ValueError("Maximum mutants per round must be greater than or equal to one.")
+        if result.status is not MutationStatus.COMPLETE or result.workspace is None:
+            raise MutationError("Survivor extraction requires a completed mutation workspace.")
+        if result.target_file.resolve() != function.file_path.resolve():
+            raise MutationError("Mutation result does not belong to the selected target source.")
+        self._verify_result_integrity(result)
+        started = time.perf_counter()
+        linux_workspace = self._linux_path(result.workspace, self._remaining(started))
+        completed = self._run_in_workspace(
+            linux_workspace,
+            (self.mutmut_executable, "results", "--all", "true"),
+            self._remaining(started),
+        )
+        if completed.returncode != 0:
+            raise MutationError(
+                f"Mutmut survivor discovery failed with exit code {completed.returncode}."
+            )
+        outcomes = parse_mutmut_results(
+            completed.stdout,
+            module_name=function.module_name,
+            function_name=function.function_name,
+        )
+        if len(outcomes) != result.total_mutants:
+            raise MutationError(
+                "Mutmut result identifiers do not match the applicable mutant count: "
+                f"expected {result.total_mutants}, found {len(outcomes)}."
+            )
+        survivor_ids = sorted(item.mutant_id for item in outcomes if item.status == "survived")[
+            :max_mutants
+        ]
+        survivors: list[SurvivingMutant] = []
+        for mutant_id in survivor_ids:
+            shown = self._run_in_workspace(
+                linux_workspace,
+                (self.mutmut_executable, "show", mutant_id),
+                self._remaining(started),
+            )
+            if shown.returncode != 0 or not shown.stdout.strip():
+                raise MutationError(f"Mutmut could not show surviving mutant {mutant_id!r}.")
+            survivors.append(SurvivingMutant(mutant_id, function.function_name, shown.stdout))
+        self._verify_result_integrity(result)
+        return SurvivorEvidence(outcomes, tuple(survivors), completed.stdout)
+
+    @staticmethod
+    def _verify_result_integrity(result: MutationResult) -> None:
+        source_hash = result.hashes.get("target_source_sha256")
+        if isinstance(source_hash, str) and _sha256(result.target_file) != source_hash:
+            raise MutationError(f"Mutation feedback found changed source: {result.target_file}")
+        accepted = result.hashes.get("accepted_test_sha256", {})
+        if isinstance(accepted, Mapping):
+            WSLMutmutBackend._verify_integrity(
+                {str(path): str(expected) for path, expected in accepted.items()}
+            )
+
     def _prepare_workspace(
         self, function: FunctionInfo, test_files: Sequence[Path | str], workspace: Path
     ) -> tuple[Path, tuple[Path, ...], Path]:
@@ -475,7 +629,7 @@ class WSLMutmutBackend(MutationBackend):
         return self._run_wsl(
             (
                 "/bin/sh",
-                "-lc",
+                "-c",
                 'cd "$1" && shift && exec "$@"',
                 "autotest-mutation",
                 linux_workspace,

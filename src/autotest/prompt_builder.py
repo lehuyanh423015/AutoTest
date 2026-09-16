@@ -2,6 +2,7 @@
 
 from autotest.coverage_runner import CoverageResult
 from autotest.failure_analyzer import FailureContext
+from autotest.mutation_runner import SurvivingMutant
 from autotest.project_analyzer import FunctionInfo
 from autotest.test_runner import TestStatus
 
@@ -152,6 +153,105 @@ Requirements:
 10. Return only complete Python source code for one supplementary pytest module.
 11. Do not include Markdown fences or explanations.
 """
+
+    def build_mutation_feedback(
+        self,
+        function: FunctionInfo,
+        accepted_test_sources: tuple[str, ...],
+        survivors: tuple[SurvivingMutant, ...],
+        round_number: int,
+        *,
+        max_chars: int = 12_000,
+    ) -> str:
+        """Build bounded, deterministic original-behavior mutation feedback."""
+        if round_number < 1:
+            raise ValueError("Mutation round number must be greater than or equal to one.")
+        if max_chars < 4_000:
+            raise ValueError("Mutation feedback limit must be at least 4000 characters.")
+        if not survivors:
+            raise ValueError("Mutation feedback requires at least one surviving mutant.")
+        numbered_source = "\n".join(
+            f"{line_number} | {line}"
+            for line_number, line in enumerate(
+                function.source_code.splitlines(), start=function.start_line
+            )
+        )
+        accepted = (
+            "\n\n".join(
+                f"Accepted test module {index}:\n{source.rstrip()}"
+                for index, source in enumerate(accepted_test_sources, start=1)
+            )
+            or "None"
+        )
+        evidence = "\n\n".join(
+            f"Surviving mutant: {item.mutant_id}\nExact Mutmut diff:\n{item.diff.rstrip()}"
+            for item in survivors
+        )
+        requirements = "\n".join(
+            (
+                "Requirements:",
+                "1. Generate only ADDITIONAL pytest tests that distinguish the ORIGINAL "
+                "implementation from defensible behavioral changes shown in the surviving "
+                "mutation diffs.",
+                f"2. Import the target with: from {function.module_name} import "
+                f"{function.function_name}",
+                "3. The supplied implementation is ORIGINAL; diffs are artificial changes. "
+                "Justify expected values from the original source, never mutant behavior or "
+                "observed mutant output.",
+                "4. Do not rewrite, reproduce, remove, weaken, or modify existing accepted tests.",
+                "5. Do not modify the original implementation, apply mutants, or alter "
+                "mutation operators.",
+                "6. Do not create tautologies, use assert True, compare a result to itself, "
+                "or derive an oracle from the same invocation.",
+                "7. Do not use network access, external services, subprocesses, package "
+                "installation, or intentional sleep.",
+                "8. Some surviving mutants may be behaviorally equivalent or not "
+                "distinguishable by a meaningful test. Do not invent arbitrary assertions "
+                "merely to force every supplied mutant to be killed. Generate a test only "
+                "when the original source provides a defensible expected behavior.",
+                "9. Return only complete Python source code for one ADDITIONAL pytest module, "
+                "without Markdown fences or explanations.",
+                "",
+            )
+        )
+        fixed = f"""You are generating ADDITIONAL pytest tests for an existing passing suite.
+
+Mutation feedback round: {round_number}
+Original target module: {function.module_name}
+Original target function: {function.function_name}
+
+ORIGINAL target function source with actual source-file line numbers:
+{{source}}
+
+Existing accepted tests (bounded context):
+{{accepted}}
+
+Selected surviving-mutant evidence (bounded context):
+{{evidence}}
+
+{requirements}"""
+        empty_size = len(fixed.format(source="", accepted="", evidence=""))
+        budget = max_chars - empty_size
+        if budget < 3:
+            raise ValueError("Mutation feedback limit is too small for required constraints.")
+        source_budget = max(1, budget // 3)
+        accepted_budget = max(1, budget // 3)
+        evidence_budget = max(1, budget - source_budget - accepted_budget)
+        prompt = fixed.format(
+            source=self._bounded(numbered_source, source_budget),
+            accepted=self._bounded(accepted, accepted_budget),
+            evidence=self._bounded(evidence, evidence_budget),
+        )
+        return prompt[:max_chars]
+
+    @staticmethod
+    def _bounded(value: str, limit: int) -> str:
+        marker = "\n[context truncated at configured character limit]"
+        if len(value) <= limit:
+            return value
+        if limit <= len(marker):
+            return marker[:limit]
+        return value[: limit - len(marker)] + marker
 
     @staticmethod
     def _status_guidance(status: TestStatus) -> str:

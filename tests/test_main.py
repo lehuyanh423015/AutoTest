@@ -9,6 +9,10 @@ from autotest.coverage_runner import CoverageResult
 from autotest.errors import AnalyzerError
 from autotest.failure_analyzer import FailureAnalyzer
 from autotest.main import main
+from autotest.mutation_feedback import (
+    MutationFeedbackSessionResult,
+    MutationFeedbackStopReason,
+)
 from autotest.mutation_runner import MutationResult, MutationStatus
 from autotest.repair_engine import (
     AttemptKind,
@@ -72,6 +76,7 @@ def run_mocked_cli(
     session: RepairSessionResult,
     *extra_args: str,
     mutation_result: MutationResult | None = None,
+    mutation_feedback_result: MutationFeedbackSessionResult | None = None,
 ) -> tuple[int, object]:
     source = tmp_path / "calculator.py"
     source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
@@ -91,10 +96,12 @@ def run_mocked_cli(
         patch("autotest.main.RepairEngine") as engine_class,
         patch("autotest.main.CoverageEngine") as coverage_engine_class,
         patch("autotest.main.WSLMutmutBackend") as mutation_backend_class,
+        patch("autotest.main.MutationFeedbackEngine") as mutation_feedback_engine_class,
     ):
         engine_class.return_value.run.return_value = session
         coverage_engine_class.return_value.run.return_value = coverage_session
         mutation_backend_class.return_value.run.return_value = mutation_result
+        mutation_feedback_engine_class.return_value.run.return_value = mutation_feedback_result
         exit_code = main(
             [
                 "--file",
@@ -267,6 +274,74 @@ def test_cli_does_not_run_requested_mutation_when_tests_fail(tmp_path: Path) -> 
     assert exit_code == 1
     root = json.loads((next((tmp_path / "runs").iterdir()) / "result.json").read_text())
     assert root["mutation"]["skipped_reason"] == "EXECUTION_NOT_PASSING"
+
+
+def test_cli_mutation_feedback_implies_mutation_and_persists_separate_metrics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    session = make_session(tmp_path, [RunStatus.PASS])
+    source = tmp_path / "calculator.py"
+    baseline = MutationResult(
+        source,
+        "add",
+        MutationStatus.COMPLETE,
+        total_mutants=2,
+        killed_mutants=1,
+        survived_mutants=1,
+        tool_total_mutants=2,
+        mutation_score_percent=50.0,
+        backend_version="3.7.0",
+    )
+    coverage = CoverageResult(
+        source.resolve(), "add", (1, 2), (1, 2), (), (), (), 100.0, None, None, 0.1
+    )
+    feedback = MutationFeedbackSessionResult(
+        baseline,
+        baseline,
+        None,
+        None,
+        (),
+        (session.attempts[-1].test_file,),
+        coverage,
+        coverage,
+        MutationFeedbackStopReason.MAX_ROUNDS_REACHED,
+    )
+
+    exit_code, _ = run_mocked_cli(
+        tmp_path,
+        session,
+        "--mutation-feedback",
+        "--max-mutation-rounds",
+        "0",
+        mutation_result=baseline,
+        mutation_feedback_result=feedback,
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Mutation feedback:" in output
+    root = json.loads((next((tmp_path / "runs").iterdir()) / "result.json").read_text())
+    assert root["mutation"]["enabled"] is True
+    assert root["mutation"]["status"] == "COMPLETE"
+    assert root["mutation_feedback"]["enabled"] is True
+    assert root["mutation_feedback"]["max_rounds"] == 0
+    assert root["mutation_feedback"]["metrics"]["mutation_feedback_llm_calls"] == 0
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [("--max-mutation-rounds", "-1"), ("--max-mutants-per-round", "0")],
+)
+def test_cli_rejects_invalid_mutation_feedback_bounds(
+    tmp_path: Path, option: str, value: str
+) -> None:
+    source = tmp_path / "calculator.py"
+    source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--file", str(source), "--function", "add", option, value])
+
+    assert exc_info.value.code == 2
 
 
 def test_cli_rejects_negative_repair_count(tmp_path: Path) -> None:
