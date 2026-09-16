@@ -1,0 +1,4 @@
+[project]
+name = "environment-pyproject"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31", "typing-extensions>=4.10; python_version < '3.13'"]

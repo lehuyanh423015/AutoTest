@@ -1,0 +1,1 @@
+"""Static requirements fixture."""

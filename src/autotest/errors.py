@@ -13,6 +13,14 @@ class ProjectInspectionError(AutoTestError):
     """Raised when static repository inspection cannot proceed."""
 
 
+class EnvironmentPlanningError(AutoTestError):
+    """Raised when a selected Python interpreter cannot be inspected safely."""
+
+
+class EnvironmentProvisionError(AutoTestError):
+    """Raised when an isolated environment cannot be provisioned safely."""
+
+
 class FunctionNotFoundError(AnalyzerError):
     """Raised when the requested top-level function does not exist."""
 

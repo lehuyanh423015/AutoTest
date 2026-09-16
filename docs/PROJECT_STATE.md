@@ -6,7 +6,7 @@ AutoTest is a research prototype that generates pytest tests for one named top-l
 
 ## Current Milestone
 
-Phase 5A repository inspection is implemented for review; the latest frozen milestone remains Phase 4B at tag `phase-4b-frozen` (`52a7abe`). Earlier frozen tags are `environment-v1.0`, `phase-2-frozen`, `phase-3-frozen`, and `phase-4a-frozen`. Phase 5A adds static discovery alongside the unchanged single-file generation pipeline. The worktree was clean at the start of Phase 5A implementation; no commit or tag was created for this phase.
+Phase 5B target environment planning and provisioning is implemented for review; the latest frozen milestone is Phase 5A at tag `phase-5a-frozen`. Earlier frozen tags include `phase-4b-frozen`, `phase-4a-frozen`, `phase-3-frozen`, `phase-2-frozen`, and `environment-v1.0`. Phase 5B is separate from the unchanged single-file generation and Phase 5A inspection modes. The worktree was clean at the start of Phase 5B implementation; no commit or tag was created for this phase.
 
 ## Implemented Phases
 
@@ -16,6 +16,7 @@ Phase 5A repository inspection is implemented for review; the latest frozen mile
 - Phase 4A: opt-in, evaluation-only mutation testing through isolated WSL/Mutmut; no survivor-driven LLM calls.
 - Phase 4B: separately opt-in survivor-diff prompts, supplementary candidates, and transactional mutation improvement checks.
 - Phase 5A: separate static local-project inspection, structured `ProjectProfile`, deterministic JSON, and `--inspect-project` CLI mode. It does not prepare or execute target environments.
+- Phase 5B: deterministic `EnvironmentPlan`, conservative interpreter/dependency policy, fresh copied target workspace, bounded manifests, target venv, pinned runner tooling, and verification. It does not generate tests or execute target code.
 
 ## Current Pipeline
 
@@ -29,6 +30,8 @@ Separately, `ProjectInspector` takes a local directory, statically reads known m
 | --- | --- |
 | Source analysis | `project_analyzer.py`: `ProjectAnalyzer`, `FunctionInfo` (top-level sync/async functions) |
 | Repository inspection | `project_inspector.py`: `ProjectInspector`, immutable `ProjectProfile`, `PythonModuleInfo`, `FunctionSummary`, dependency and Python-requirement declarations |
+| Environment planning | `environment_planner.py`: `InterpreterInfo`, immutable `EnvironmentPlan`, compatibility and dependency policy, `EnvironmentPlanner` |
+| Environment provisioning | `environment_provisioner.py`: `EnvironmentProvisioner`, safe copy manifests, bounded argv command runner, `TargetEnvironment` |
 | Prompts and LLM | `prompt_builder.py`: `PromptBuilder`; `llm/base.py`: `LLMProvider`; `llm/ollama_provider.py`: `OllamaProvider` |
 | Generation and execution | `test_generator.py`: `TestGenerator`, `sanitize_test_code`; `test_runner.py`: `TestRunner` |
 | Feedback and repair | `failure_analyzer.py`: `FailureAnalyzer`; `test_quality.py`: AST diagnostics; `repair_engine.py`: `RepairEngine` |
@@ -57,6 +60,8 @@ Repository pins CPython `3.12.10` (`.python-version`, `requires-python >=3.12,<3
 `uv run python -m autotest.main --file <file.py> --function <top-level-name>` accepts model/URL/output, pytest and Ollama timeouts, temperature, repair and coverage limits/target, opt-in `--mutation` or `--mutation-feedback`, mutation round/survivor bounds, mutation timeout/venv, and `--debug`. Defaults include `workspace/runs`, 30-second test timeout, 3 repair rounds, 3 coverage rounds, 100% coverage target, 3 mutation feedback rounds, and 5 survivors per round. There is no CLI option for the WSL distribution name.
 
 `uv run python -m autotest.main --inspect-project <directory> [--profile-output <file>]` runs only static inspection. It needs no `--file`/`--function`, prints a summary, and optionally writes portable UTF-8 JSON to the explicitly requested path. Exit 0 means inspection completed, including a non-Python directory; exit 2 means inspection or output persistence failed. It does not report test execution statuses.
+
+`--plan-environment <directory>` inspects and plans without workspace creation, installation, network, or target execution. `--prepare-environment <directory>` provisions a fresh environment. Both accept `--target-python <path>` and `--environment-offline`; preparation also uses `--environment-output-root` (default `workspace/target_environments`) and `--environment-timeout` (default 600 seconds per command). A supported or unsupported plan exits 0; preparation exits 0 only for `READY`, otherwise 2. Frozen generation and inspection exit contracts are unchanged.
 
 ## Artifact Structure
 
@@ -101,7 +106,7 @@ The Phase 5A development baseline started from that green suite. Phase 5A adds l
 
 ## Known Limitations
 
-Generation scope is one standalone file and one top-level function. No package/method context, environment preparation, external specification, equivalent-mutant classification, or source repair exists. Prompt context is character bounded. PASS, coverage, and mutation score are distinct evidence, never semantic correctness proofs. Generated tests are untrusted; subprocess timeouts and WSL workspaces are not a security sandbox.
+Generation scope is one standalone file and one top-level function. No package/method context, connection from prepared environments to generation, external specification, equivalent-mutant classification, or source repair exists. Prompt context is character bounded. PASS, coverage, and mutation score are distinct evidence, never semantic correctness proofs. Generated tests are untrusted; subprocess timeouts, venvs, and WSL workspaces are not a security sandbox.
 
 Phase 5A discovers dependency declarations and layout but does not resolve or install dependencies, interpret lockfile solver semantics, execute target code, select cross-file context, or run generation against a repository. Dynamic `setup.py` values remain warnings. The source scan is bounded to 2 MiB per file and 10,000 Python files by default; excluded directories and directory symlinks are not traversed.
 
@@ -119,4 +124,12 @@ The WSL backend's distribution name is fixed in code and differs from this PC's 
 
 ## Recommended Next Phase
 
-Phase 5B — Target Environment Management: use the Phase 5A profile to plan isolated target interpreters and dependency preparation, without changing the frozen generation/repair/coverage/mutation contracts implicitly. Address source/accepted-file integrity and containment before broad untrusted-repository trials. Cross-file context selection and repository test generation remain later work.
+Phase 5C — Cross-file Dependency and Context Selection: use inspected repository structure to choose target functions and bounded cross-file context without starting repository test generation. Address source/accepted-file integrity and containment before broad untrusted-repository trials. Repository test generation remains later work.
+
+## Phase 5B Handoff
+
+`EnvironmentPlanner` consumes a `ProjectProfile` and selected `InterpreterInfo`, probes only the interpreter, and produces an immutable `EnvironmentPlan` with a deterministic hash. Planning does not write, install, access the network, or call Ollama. The current AutoTest CPython is the default; `--target-python` selects one explicit local executable. Common numeric Python specifiers are checked conservatively; complex or conflicting declarations are unsupported. The strategies are `NONE`, safe `REQUIREMENTS`, and static `PYPROJECT_DECLARATIONS`. Runtime dependencies alone are selected. Optional/development groups, unsafe requirements directives, URLs/VCS/paths, legacy dynamic metadata, and conflicting Poetry/Pipenv or manager evidence are unsupported. `uv.lock` is recorded without claiming exact lock replay.
+
+`EnvironmentProvisioner` reserves a fresh workspace outside the original repository, copies only bounded regular files, and never follows symlinks. Copy limits are 20,000 files, 32 MiB per file, and 512 MiB total. It persists original and copied relative-path SHA-256 manifests and requires equality before installation; it rechecks the original manifest after success or failure. It creates a target venv with the selected interpreter, uses uv with argv lists, no shell, no automatic Python downloads, no build from source, and per-command timeouts, then verifies `pytest==8.4.2`, `coverage==7.16.0`, and `pytest-timeout==2.4.0` separately from target dependencies. The target project is never installed or imported. The workspace contains profile/plan/result JSON, `source/`, `.venv/`, and command argv/stdout/stderr/status/duration artifacts. The copy and venv protect experiment reproducibility and the original checkout by convention; they are not a hostile-code sandbox.
+
+Phase 5B validation and the real local provisioning result are recorded in `docs/phase_reports/phase-5b.md`. The offline smoke attempt failed because the uv cache lacked runner wheels; a subsequent normal provisioning run succeeded with `READY`, verified manifests, unchanged source, and exact runner versions. No Python dependency or `uv.lock` change was made. Prepared environments are not yet consumed by the generation pipeline.

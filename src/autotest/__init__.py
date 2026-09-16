@@ -13,6 +13,20 @@ from autotest.coverage_engine import (
     CoverageStopReason,
 )
 from autotest.coverage_runner import CoverageResult, CoverageRunner
+from autotest.environment_planner import (
+    DependencyStrategy,
+    EnvironmentPlan,
+    EnvironmentPlanner,
+    EnvironmentPlanStatus,
+    InterpreterInfo,
+    PythonCompatibility,
+    probe_interpreter,
+)
+from autotest.environment_provisioner import (
+    EnvironmentProvisioner,
+    EnvironmentProvisionStatus,
+    TargetEnvironment,
+)
 from autotest.project_analyzer import FunctionInfo, ProjectAnalyzer
 from autotest.project_inspector import (
     DependencyDeclaration,
@@ -46,11 +60,19 @@ __all__ = [
     "CoverageSessionResult",
     "CoverageStopReason",
     "DependencyDeclaration",
+    "DependencyStrategy",
+    "EnvironmentPlan",
+    "EnvironmentPlanner",
+    "EnvironmentPlanStatus",
+    "EnvironmentProvisioner",
+    "EnvironmentProvisionStatus",
     "FunctionSummary",
+    "InterpreterInfo",
     "ProjectAnalyzer",
     "ProjectInspector",
     "ProjectProfile",
     "PythonModuleInfo",
+    "PythonCompatibility",
     "PythonRequirementDeclaration",
     "RepairEngine",
     "RepairSessionResult",
@@ -61,4 +83,6 @@ __all__ = [
     "TestRunResult",
     "TestRunner",
     "TestStatus",
+    "TargetEnvironment",
+    "probe_interpreter",
 ]

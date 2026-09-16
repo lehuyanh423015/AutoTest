@@ -15,7 +15,7 @@ from typing import Any
 
 from autotest.errors import ProjectInspectionError
 
-_EXCLUDED_DIRS = frozenset(
+INSPECTION_EXCLUDED_DIRS = frozenset(
     {
         ".git",
         ".hg",
@@ -36,6 +36,7 @@ _EXCLUDED_DIRS = frozenset(
         "examples",
     }
 )
+_EXCLUDED_DIRS = INSPECTION_EXCLUDED_DIRS
 _LOCK_NAMES = ("uv.lock", "poetry.lock", "Pipfile.lock")
 _METADATA_NAMES = ("pyproject.toml", "setup.cfg", "setup.py", "pytest.ini", "tox.ini")
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")

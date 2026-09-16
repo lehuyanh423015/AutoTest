@@ -11,6 +11,13 @@ from typing import Sequence
 from autotest.artifact_store import ArtifactStore
 from autotest.coverage_engine import CoverageEngine, CoverageSessionResult, CoverageStopReason
 from autotest.coverage_runner import CoverageRunner
+from autotest.environment_planner import (
+    EnvironmentPlan,
+    EnvironmentPlanner,
+    EnvironmentPlanStatus,
+    probe_interpreter,
+)
+from autotest.environment_provisioner import EnvironmentProvisioner, TargetEnvironment
 from autotest.errors import AutoTestError
 from autotest.llm.ollama_provider import OllamaConfig, OllamaProvider
 from autotest.mutation_feedback import (
@@ -81,6 +88,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--profile-output", type=Path, help="Write inspection JSON to this explicit path"
+    )
+    parser.add_argument(
+        "--plan-environment", type=Path, help="Plan an isolated target environment without writes"
+    )
+    parser.add_argument(
+        "--prepare-environment", type=Path, help="Provision a copied target environment"
+    )
+    parser.add_argument("--target-python", type=Path, help="Explicit local CPython interpreter")
+    parser.add_argument(
+        "--environment-output-root",
+        type=Path,
+        default=Path("workspace/target_environments"),
+        help="Root for fresh prepared target environments",
+    )
+    parser.add_argument(
+        "--environment-timeout",
+        type=_positive_number,
+        default=600.0,
+        help="Per-command environment timeout in seconds (default: 600)",
+    )
+    parser.add_argument(
+        "--environment-offline", action="store_true", help="Use uv's verified --offline mode"
     )
     parser.add_argument("--model", default="qwen2.5-coder:14b", help="Ollama model name")
     parser.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama base URL")
@@ -315,16 +344,67 @@ def _print_profile(profile: ProjectProfile, output: Path | None) -> None:
         print(f"Profile: {output}")
 
 
+def _print_environment_plan(plan: EnvironmentPlan) -> None:
+    print(f"Project: {plan.project_name}")
+    print(f"Environment support: {plan.status.value}")
+    print(f"Project profile: {plan.project_profile_sha256}")
+    print(f"Python requirement: {plan.python_requirement or 'not declared'}")
+    print(f"Selected Python: {plan.selected_python.version} ({plan.selected_python.executable})")
+    print(f"Compatibility: {plan.compatibility.value}")
+    print(f"Dependency strategy: {plan.dependency_strategy.value}")
+    print(f"Runtime dependencies: {len(plan.dependencies)}")
+    print(f"Runner tools: {', '.join(plan.runner_requirements)}")
+    print(f"Network may be required: {'YES' if plan.network_may_be_required else 'NO'}")
+    print("Target project installation: NO")
+    print(f"Plan hash: {plan.sha256}")
+    for warning in plan.warnings:
+        print(f"Warning: {warning}")
+    for reason in plan.unsupported_reasons:
+        print(f"Unsupported: {reason}")
+
+
+def _print_target_environment(result: TargetEnvironment) -> None:
+    print(f"Environment: {result.status.value}")
+    print(f"Workspace: {result.workspace_root or 'not created'}")
+    print(f"Source copy: {'VERIFIED' if result.copy_integrity_verified else 'NOT VERIFIED'}")
+    print(
+        "Original repository: "
+        + ("UNCHANGED" if result.original_integrity_verified else "NOT VERIFIED")
+    )
+    print(f"Python: {result.python_version or 'unknown'}")
+    print(
+        "Target dependencies: "
+        + ("SATISFIED" if result.target_dependencies_installed else "NOT INSTALLED")
+    )
+    print(f"Runner tools: {'VERIFIED' if result.status.value == 'READY' else 'NOT VERIFIED'}")
+    if result.workspace_root is not None:
+        print(f"Environment plan: {result.workspace_root / 'environment_plan.json'}")
+        print(f"Provision result: {result.workspace_root / 'provision_result.json'}")
+    if result.error_message:
+        print(f"Environment error: {result.error_message}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.inspect_project is None:
-        if args.profile_output is not None:
-            parser.error("--profile-output requires --inspect-project")
+    static_modes = [args.inspect_project, args.plan_environment, args.prepare_environment]
+    if sum(mode is not None for mode in static_modes) > 1:
+        parser.error("Inspection, environment planning, and preparation modes are exclusive")
+    if args.inspect_project is None and args.profile_output is not None:
+        parser.error("--profile-output requires --inspect-project")
+    if args.inspect_project is not None:
+        if args.file is not None or args.function is not None:
+            parser.error("--inspect-project cannot be combined with --file or --function")
+    elif args.plan_environment is not None or args.prepare_environment is not None:
+        if args.file is not None or args.function is not None:
+            parser.error("Environment modes cannot be combined with --file or --function")
+    else:
         if args.file is None or args.function is None:
-            parser.error("--file and --function are required unless --inspect-project is used")
-    elif args.file is not None or args.function is not None:
-        parser.error("--inspect-project cannot be combined with --file or --function")
+            parser.error("--file and --function are required unless a static mode is used")
+    if args.inspect_project is not None and (
+        args.target_python is not None or args.environment_offline
+    ):
+        parser.error("Environment options require --plan-environment or --prepare-environment")
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s: %(message)s",
@@ -345,6 +425,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 2
             _print_profile(profile, output)
             return 0
+        environment_root = args.plan_environment or args.prepare_environment
+        if environment_root is not None:
+            profile = ProjectInspector().inspect(environment_root)
+            interpreter = probe_interpreter(args.target_python)
+            plan = EnvironmentPlanner().plan(profile, interpreter, offline=args.environment_offline)
+            _print_environment_plan(plan)
+            if args.plan_environment is not None:
+                return 0
+            if plan.status is EnvironmentPlanStatus.UNSUPPORTED:
+                return 2
+            result = EnvironmentProvisioner(timeout=args.environment_timeout).provision(
+                environment_root, profile, plan, args.environment_output_root
+            )
+            _print_target_environment(result)
+            return 0 if result.status.value == "READY" else 2
         analyzer = ProjectAnalyzer()
         function = analyzer.analyze_function(args.file, args.function)
         LOGGER.info("Analyzed %s from %s", function.function_name, function.file_path)

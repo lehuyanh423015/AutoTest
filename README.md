@@ -1,7 +1,8 @@
-# AutoTest — Phase 5A repository inspection and Phase 4B test generation
+# AutoTest — Phase 5B target environments and Phase 4B test generation
 
 AutoTest is a research prototype that asks a local large language model to generate pytest
-tests for a selected Python function. Phase 5A adds a separate static repository inspection mode.
+tests for a selected Python function. Phase 5A adds static repository inspection; Phase 5B plans
+and prepares copied, isolated target environments without running repository tests.
 Phase 4B adds separately opt-in mutation-guided generation
 after the frozen generation, repair, coverage, and Phase 4A evaluation pipeline has produced a
 passing cumulative suite:
@@ -26,6 +27,10 @@ process with a configurable timeout.
 - `project_analyzer.py` discovers and extracts top-level functions with Python's `ast` module.
 - `project_inspector.py` discovers repository metadata, layouts, modules, and top-level functions
   without importing or executing the inspected project.
+- `environment_planner.py` turns a `ProjectProfile` and an explicit CPython interpreter into an
+  immutable `EnvironmentPlan` without installing packages or writing to the repository.
+- `environment_provisioner.py` copies a bounded repository into a fresh workspace, creates a
+  venv, installs validated dependencies and pinned runner tools, and records integrity evidence.
 - `prompt_builder.py` creates a deterministic, constrained pytest prompt.
 - `llm/base.py` defines the provider-neutral generation interface.
 - `llm/ollama_provider.py` calls Ollama's `/api/generate` REST endpoint with `urllib.request`.
@@ -97,6 +102,56 @@ build outputs, and files above 2 MiB; malformed files produce warnings.
 **Project inspection does not install dependencies or execute repository code.** It never imports
 target modules, executes `setup.py` or build hooks, runs target tests, or follows directory
 symlinks. It is descriptive input for later phases, not a prepared target environment.
+
+## Phase 5B: plan and prepare a target environment
+
+Planning consumes the Phase 5A profile. It selects the current AutoTest CPython by default, or
+the local interpreter supplied with `--target-python`. The interpreter itself is probed; AutoTest
+does not search for or download Python versions. A plan records the profile hash, interpreter,
+Python compatibility, dependency strategy and exact declarations, lockfile evidence, runner pins,
+network policy, warnings, and unsupported reasons. `install_target_project` is always `false`.
+Planning creates no venv or artifacts, makes no network or Ollama call, and does not execute target
+code. An unsupported project is a valid plan result.
+
+```powershell
+uv run python -m autotest.main --plan-environment tests/fixtures/projects/environment_no_deps
+uv run python -m autotest.main --plan-environment C:\path\to\repo --target-python C:\Python311\python.exe
+uv run python -m autotest.main --prepare-environment tests/fixtures/projects/environment_no_deps `
+    --environment-output-root workspace/target_environments `
+    --environment-timeout 600
+```
+
+The `--environment-offline` option adds uv's `--offline` flag to both install steps. Without it,
+preparation may access the package index; planning does not. The timeout applies to each external
+command. Planning exits 0 for supported or unsupported plans and 2 for inspection/probe errors.
+Preparation exits 0 only for `READY`, and 2 for an unsupported plan or provisioning failure.
+These modes need neither `--file` nor `--function` and do not enter the generation pipeline.
+
+V1 supports projects with no runtime dependencies, simple registry requirements declarations,
+and static `[project].dependencies`. Only runtime declarations are installed; optional, test, and
+development groups are not inferred. The Python compatibility subset is `>=`, `>`, `<=`, `<`,
+`==`, `!=`, `~=`, comma conjunctions, and `==`/`!=` wildcard suffixes. Unparseable or conflicting
+Python requirements, conflicting manager ecosystems, Poetry/Pipenv, dynamic dependency metadata,
+unsafe requirements directives, direct URLs/VCS/local paths, and legacy runtime dependency
+declarations are unsupported. `uv.lock` is recorded, but exact lock replay is not implemented.
+Registry resolution can therefore change over time.
+
+Every preparation creates a new `workspace/target_environments/<id>/` directory containing
+`project_profile.json`, `environment_plan.json`, `original_manifest.json`,
+`copied_manifest.json`, `provision_result.json`, `source/`, `.venv/`, and per-command JSON,
+stdout, and stderr in `commands/`. The copy skips Phase 5A's cache, venv, build, VCS, and
+workspace directories and never follows symlinks. Limits are 20,000 files, 32 MiB per file,
+and 512 MiB total. SHA-256 manifests must match before installation; the original manifest is
+checked again after success or failure. A copied `ProjectProfile` hash is checked when practical.
+All commands use argument arrays, no shell, and a per-command timeout. The target project is
+never installed or imported; `setup.py`, build hooks, and target tests are not run.
+
+Runner tools are installed separately from target dependencies: `pytest==8.4.2`,
+`coverage==7.16.0`, and `pytest-timeout==2.4.0`. Their versions are verified inside the venv.
+Mutmut, Ollama packages, and AutoTest itself are not installed there. **Phase 5B protects the
+original checkout by working from a copied workspace, but a Python virtual environment is not
+a security sandbox.** It does not contain hostile package installation code or future target
+execution; use a disposable external sandbox for untrusted projects.
 
 Install the locked project environment:
 

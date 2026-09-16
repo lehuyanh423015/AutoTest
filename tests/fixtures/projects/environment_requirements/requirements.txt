@@ -1,0 +1,2 @@
+requests>=2.31
+typing-extensions>=4.10; python_version < "3.13"
