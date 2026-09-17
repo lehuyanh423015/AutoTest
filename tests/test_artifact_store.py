@@ -217,6 +217,8 @@ def test_mutation_artifacts_are_immutable_and_normalized(tmp_path: Path) -> None
         backend_version="3.7.0",
         python_version="Python 3.10.12",
         pytest_version="pytest 8.4.2",
+        mutation_venv="/home/ubuntu/autotest-mutation-env",
+        wsl_distribution="Ubuntu",
         raw_stats_file=raw,
         workspace=artifacts.workspace,
         hashes={"target_source_sha256": "abc"},
@@ -229,6 +231,10 @@ def test_mutation_artifacts_are_immutable_and_normalized(tmp_path: Path) -> None
     assert json.loads(artifacts.result_file.read_text(encoding="utf-8")) == metadata
     assert metadata["status"] == "COMPLETE"
     assert metadata["mutation_score_percent"] == pytest.approx(66.6666667)
+    assert metadata["wsl_distribution"] == "Ubuntu"
+    assert metadata["mutation_venv"] == "/home/ubuntu/autotest-mutation-env"
+    assert metadata["backend_version"] == "3.7.0"
+    assert metadata["python_version"] == "Python 3.10.12"
     assert artifacts.stdout_file.read_text(encoding="utf-8") == "tool output\n"
     assert artifacts.stderr_file.read_text(encoding="utf-8") == ""
     with pytest.raises(ArtifactError, match="Refusing to overwrite"):

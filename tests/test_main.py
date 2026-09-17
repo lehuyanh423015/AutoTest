@@ -77,6 +77,7 @@ def run_mocked_cli(
     *extra_args: str,
     mutation_result: MutationResult | None = None,
     mutation_feedback_result: MutationFeedbackSessionResult | None = None,
+    captures: dict | None = None,
 ) -> tuple[int, object]:
     source = tmp_path / "calculator.py"
     source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
@@ -101,6 +102,8 @@ def run_mocked_cli(
         engine_class.return_value.run.return_value = session
         coverage_engine_class.return_value.run.return_value = coverage_session
         mutation_backend_class.return_value.run.return_value = mutation_result
+        if captures is not None:
+            captures["backend_class"] = mutation_backend_class
         mutation_feedback_engine_class.return_value.run.return_value = mutation_feedback_result
         exit_code = main(
             [
@@ -247,6 +250,30 @@ def test_cli_mutation_success_preserves_pass_exit_and_root_metrics(
     root = json.loads((next((tmp_path / "runs").iterdir()) / "result.json").read_text())
     assert root["mutation"]["status"] == "COMPLETE"
     assert root["mutation"]["final_line_coverage"] == 100.0
+
+
+def test_standalone_cli_passes_explicit_distro_over_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTOTEST_MUTATION_WSL_DISTRO", "Ubuntu")
+    captures = {}
+    result = MutationResult(
+        tmp_path / "calculator.py",
+        "add",
+        MutationStatus.COMPLETE,
+        total_mutants=1,
+        killed_mutants=1,
+        mutation_score_percent=100.0,
+    )
+    exit_code, _ = run_mocked_cli(
+        tmp_path,
+        make_session(tmp_path, [RunStatus.PASS]),
+        "--mutation",
+        "--mutation-wsl-distribution",
+        "Ubuntu-22.04",
+        mutation_result=result,
+        captures=captures,
+    )
+    assert exit_code == 0
+    assert captures["backend_class"].call_args.kwargs["distro"] == "Ubuntu-22.04"
 
 
 @pytest.mark.parametrize(

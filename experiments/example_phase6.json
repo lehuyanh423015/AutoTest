@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "experiment_name": "phase6-demo",
+  "repetitions": 1,
+  "model": "qwen2.5-coder:14b",
+  "temperature": 0.0,
+  "evaluate_mutation": false,
+  "fail_fast": false,
+  "repositories": [
+    {
+      "id": "repository_pilot",
+      "path": "../tests/fixtures/projects/repository_pilot",
+      "targets": [
+        {"id": "calculate_total", "target": "src/demo/pricing.py:calculate_total"},
+        {"id": "normalize_amount", "target": "src/demo/pricing.py:normalize_amount"}
+      ]
+    }
+  ],
+  "configurations": ["direct", "execution", "coverage", "mutation"]
+}

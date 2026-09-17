@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ from autotest.project_analyzer import FunctionInfo
 MUTMUT_VERSION = "3.7.0"
 PYTEST_VERSION = "8.4.2"
 DEFAULT_MUTATION_VENV = "/home/ubuntu/autotest-mutation-env"
+DEFAULT_WSL_DISTRIBUTION = "Ubuntu-22.04"
 ENVIRONMENT_CHECK_TIMEOUT = 30.0
 _STAT_FIELDS = (
     "killed",
@@ -65,6 +67,7 @@ class MutationResult:
     python_version: str | None = None
     pytest_version: str | None = None
     mutation_venv: str | None = None
+    wsl_distribution: str | None = None
     raw_stats_file: Path | None = None
     workspace: Path | None = None
     hashes: Mapping[str, Any] = field(default_factory=dict)
@@ -258,13 +261,18 @@ def parse_mutmut_stats(
 ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def resolve_mutation_wsl_distribution(explicit: str | None = None) -> str:
+    """Resolve host infrastructure without changing mutation or experiment identity."""
+    return explicit or os.environ.get("AUTOTEST_MUTATION_WSL_DISTRO") or DEFAULT_WSL_DISTRIBUTION
+
+
 class WSLMutmutBackend(MutationBackend):
     """Run pinned Mutmut through WSL in a fresh copied workspace."""
 
     def __init__(
         self,
         *,
-        distro: str = "Ubuntu-22.04",
+        distro: str | None = None,
         timeout: float = 300.0,
         expected_version: str = MUTMUT_VERSION,
         expected_pytest_version: str = PYTEST_VERSION,
@@ -273,7 +281,7 @@ class WSLMutmutBackend(MutationBackend):
     ) -> None:
         if timeout <= 0:
             raise ValueError("Mutation timeout must be greater than zero.")
-        self.distro = distro
+        self.distro = resolve_mutation_wsl_distribution(distro)
         self.timeout = float(timeout)
         self.expected_version = expected_version
         self.expected_pytest_version = expected_pytest_version
@@ -387,6 +395,7 @@ class WSLMutmutBackend(MutationBackend):
                         python_version=python_version,
                         pytest_version=pytest_version,
                         mutation_venv=self.mutation_venv,
+                        wsl_distribution=self.distro,
                         workspace=workspace,
                         hashes=hashes,
                         stdout="\n".join(stdout_parts),
@@ -426,6 +435,7 @@ class WSLMutmutBackend(MutationBackend):
             )
             return replace(
                 normalized,
+                wsl_distribution=self.distro,
                 stdout="\n".join(stdout_parts),
                 stderr="\n".join(stderr_parts),
             )
@@ -681,6 +691,7 @@ class WSLMutmutBackend(MutationBackend):
             python_version=python_version,
             pytest_version=pytest_version,
             mutation_venv=self.mutation_venv,
+            wsl_distribution=self.distro,
             workspace=workspace if workspace.exists() else None,
             hashes=dict(hashes),
             error_message=message,

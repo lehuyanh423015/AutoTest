@@ -365,6 +365,28 @@ imports such as `from calculator import divide` produce the same module key Mutm
 `source_paths` contains only that exact file; generated tests are not mutated. Original source and
 accepted-test hashes are checked after the tool runs.
 
+The historical WSL registration-name default is `Ubuntu-22.04`. A machine may run Ubuntu OS 22.04
+under a different registration name, such as `Ubuntu`. Set the machine-local
+`AUTOTEST_MUTATION_WSL_DISTRO` variable or pass `--mutation-wsl-distribution`; the CLI value takes
+precedence over the variable, which takes precedence over the historical default. The separate
+`--mutation-venv` path/default is unchanged. No override is needed on a machine registered as
+`Ubuntu-22.04`. On a machine registered as `Ubuntu`, use either:
+
+```powershell
+$env:AUTOTEST_MUTATION_WSL_DISTRO = "Ubuntu"
+uv run python -m autotest.main `
+    --run-project tests/fixtures/projects/repository_pilot `
+    --project-target src/demo/pricing.py:calculate_total `
+    --mutation
+
+uv run python -m autotest.main `
+    --run-project tests/fixtures/projects/repository_pilot `
+    --project-target src/demo/pricing.py:calculate_total `
+    --mutation --mutation-wsl-distribution Ubuntu
+```
+
+The registration name is host infrastructure and is not part of Phase 6 experiment identity.
+
 ```powershell
 uv run python -m autotest.main `
     --file tests/fixtures/sample_project/branching.py `
@@ -600,3 +622,45 @@ Generated tests are untrusted code. The timeout and separate process are basic s
 not a security sandbox. **Subprocess isolation is NOT a security sandbox.** Run AutoTest only in a
 disposable or otherwise appropriately isolated environment until container sandboxing is added
 in a later phase. Phase 1.1 also does not configure dependencies for arbitrary repositories.
+
+## Phase 6 experiments
+
+Phase 6 evaluates the frozen repository pipeline across targets, configurations, and repetitions.
+The versioned JSON manifest [example_phase6.json](experiments/example_phase6.json) names local
+repositories and project-relative top-level targets. Repository paths resolve relative to the
+manifest. IDs are stable research labels; repetition indices start at 1. The plan orders repository
+ID, target ID, repetition, then `direct`, `execution`, `coverage`, `mutation`. Runs are sequential;
+each starts a fresh copied target environment and generated suite.
+
+```powershell
+uv run python -m autotest.main --validate-experiment experiments/example_phase6.json
+uv run python -m autotest.main --run-experiment experiments/example_phase6.json `
+    --experiment-output-root workspace/experiments
+uv run python -m autotest.main --resume-experiment workspace/experiments/phase6-demo
+```
+
+`direct` generates once, measures coverage when executable, and uses no repair or feedback.
+`execution` adds bounded repair. `coverage` also adds bounded coverage feedback. `mutation` adds
+mutation feedback and final evaluation. The manifest's `evaluate_mutation` requests final mutation
+evaluation for all groups without exposing survivors to `direct`, `execution`, or `coverage`.
+Mutation support is limited to the existing Phase 5D repository envelope.
+
+Validation inspects and plans without provisioning, pytest, mutation, or LLM calls. A malformed
+manifest exits 2; a valid manifest with unsupported targets exits 0. A completed benchmark exits 0
+even when generated tests fail or targets are unsupported. Experiment infrastructure failures or
+an incomplete fail-fast run exit 2. Individual outcomes remain in the records.
+
+The experiment directory contains immutable definition and plan snapshots, version evidence,
+per-run `run_spec.json` and `run_record.json`, references to full Phase 5D artifacts, atomic
+`experiment_state.json` checkpoints, `results/runs.{json,csv}`,
+`results/aggregates.{json,csv}`, `results/failures.csv`, and `summary.json`. Resume checks the
+manifest, plan, target profile hashes, and saved run identities, skips complete logical runs, and
+retries incomplete ones. Keep the source manifest in place for resume.
+
+Primary metrics and denominators are defined in [Phase 6 metrics](docs/PHASE6_METRICS.md).
+Missing measurements are `null` in JSON and empty in CSV, never zero. Aggregates include observation
+counts and descriptive statistics only. Mutation score uses killed / (killed + survived); raw,
+applicable, and other/unreported counts are separate. LLM calls and elapsed time are cost proxies,
+not financial token charges. Repeated fresh venvs and mutation workspaces can consume substantial
+disk space. Only benchmark repositories trusted enough to execute on the host; AutoTest does not
+contain malicious repository code. Use an external VM if stronger isolation is required.

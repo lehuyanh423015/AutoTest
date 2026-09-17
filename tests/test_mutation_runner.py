@@ -7,6 +7,7 @@ import pytest
 from autotest.errors import MutationError
 from autotest.mutation_runner import (
     DEFAULT_MUTATION_VENV,
+    DEFAULT_WSL_DISTRIBUTION,
     MUTMUT_VERSION,
     PYTEST_VERSION,
     MutationStatus,
@@ -252,6 +253,30 @@ def run_backend(tmp_path: Path, mode: str = "success", mutation_venv: str = DEFA
         function, [test_file], mutation_dir
     )
     return result, fake, function, test_file, mutation_dir
+
+
+@pytest.mark.parametrize(
+    ("environment", "explicit", "expected"),
+    [
+        (None, None, DEFAULT_WSL_DISTRIBUTION),
+        ("Ubuntu", None, "Ubuntu"),
+        ("Ubuntu", "Ubuntu-22.04", "Ubuntu-22.04"),
+    ],
+)
+def test_wsl_distribution_precedence_and_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environment, explicit, expected
+) -> None:
+    if environment is None:
+        monkeypatch.delenv("AUTOTEST_MUTATION_WSL_DISTRO", raising=False)
+    else:
+        monkeypatch.setenv("AUTOTEST_MUTATION_WSL_DISTRO", environment)
+    fake = FakeRunner(tmp_path)
+    backend = WSLMutmutBackend(distro=explicit, process_runner=fake)
+    assert backend.distro == expected
+    backend._run_wsl(("/bin/sh", "-c", "printf WSL_READY"), 1)
+    assert fake.commands == [
+        ["wsl.exe", "-d", expected, "--exec", "/bin/sh", "-c", "printf WSL_READY"]
+    ]
 
 
 def test_wsl_backend_uses_fresh_workspace_final_tests_and_function_selector(tmp_path: Path) -> None:

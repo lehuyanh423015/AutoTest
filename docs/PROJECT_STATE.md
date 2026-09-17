@@ -6,7 +6,7 @@ AutoTest is a research prototype that generates pytest tests for one named top-l
 
 ## Current Milestone
 
-Phase 5D repository-scale pilot is implemented for review. The latest frozen milestone is Phase 5C at tag `phase-5c-frozen` (commit `43d7369`). Earlier frozen tags include `phase-5b-frozen`, `phase-5a-frozen`, `phase-4b-frozen`, `phase-4a-frozen`, `phase-3-frozen`, `phase-2-frozen`, and `environment-v1.0`. Phase 5D is uncommitted and untagged; previous CLI modes remain separate.
+Phase 6 experiment framework is implemented on `phase-6-work` for review. The latest frozen milestone is Phase 5D at tag `phase-5d-frozen` (commit `181892a`). Phase 6 does not change or freeze the repository-scale execution pipeline. Previous CLI modes remain separate.
 
 ## Implemented Phases
 
@@ -19,6 +19,7 @@ Phase 5D repository-scale pilot is implemented for review. The latest frozen mil
 - Phase 5B: deterministic `EnvironmentPlan`, conservative interpreter/dependency policy, fresh copied target workspace, bounded manifests, target venv, pinned runner tooling, and verification. It does not generate tests or execute target code.
 - Phase 5C: `ProjectProfile` plus one project-relative top-level function becomes a portable `ContextBundle` with exact source items, static dependency edges, hashes, unresolved/external evidence, and budget omissions. It does not generate or run tests.
 - Phase 5D: `RepositoryRunEngine` joins that profile and context to a verified Phase 5B copy, target-venv pytest/coverage, repository prompts, bounded repair and supplementary tests, optional WSL mutation, integrity checks, and a root `RepositoryRunResult`.
+- Phase 6: a versioned JSON experiment definition expands local benchmark targets across four canonical configurations and 1-based repetitions. `ExperimentRunner` drives fresh sequential `RepositoryRunEngine` executions, checkpoints each logical run, resumes by verified identity, and exports normalized records, descriptive aggregates, failures, and summary artifacts.
 
 ## Current Pipeline
 
@@ -131,15 +132,15 @@ Static analysis does not import target modules. AutoTest does not use `exec()`/`
 
 ## Git / Sync Workflow
 
-`main` tracks `origin` on GitHub; frozen tags mark milestones. Preserve existing dirty files and ignored `workspace/` run evidence; review `git status --short` before/after future work. `.gitignore` and `.syncthing-ignore` exclude caches, temporary outputs, and workspace runs; Syncthing configuration is local. Do not infer unrecorded Phase 1 history from later reports. No commit or tag was created by this audit.
+`main` tracks `origin` on GitHub; frozen tags mark milestones. Phase 6 work is on `phase-6-work` for review. Git is the cross-device workflow. Preserve ignored `workspace/` run evidence and review `git status --short` before/after future work. No merge, freeze tag, or history rewrite is part of Phase 6 implementation.
 
 ## Current Technical Debt
 
-The WSL backend's distribution name is fixed in code; machines with another alias require configuration/code changes. The mutation setup README has a historical absolute checkout path. Generated-test subprocesses have no filesystem/container isolation, and Phase 5D hash checks are post-hoc detection, not write prevention. Heuristic failure categories and AST oracle warnings cannot establish semantic test quality. Earlier phase reports and their counts are historical snapshots.
+The WSL backend keeps historical default `Ubuntu-22.04`; host registrations can override it with `AUTOTEST_MUTATION_WSL_DISTRO` or `--mutation-wsl-distribution` (CLI > environment > default). This desktop's Ubuntu 22.04.1 registration is `Ubuntu`, now on WSL 2. Historically, while it used WSL 1, an `E:` backed Phase 6 mutation workspace failed with a copy permission error; mutation passed from Windows Temp. After conversion to WSL 2, all four cells of the same Phase 6 mini-experiment completed from an `E:` workspace and the permission error did not reproduce. The mutation setup README has a historical absolute checkout path. Generated-test subprocesses have no filesystem/container isolation, and Phase 5D hash checks are post-hoc detection, not write prevention. Heuristic failure categories and AST oracle warnings cannot establish semantic test quality. Earlier phase reports and their counts are historical snapshots.
 
 ## Recommended Next Phase
 
-Phase 6 — Experiment and Benchmark Framework: evaluate the controlled repository pilot systematically across targets and configurations. Do not treat Phase 5D as universal repository support or a sandbox.
+Phase 7 — Final Hardening, Research Packaging and Release Baseline. Review and freeze Phase 6 first; do not treat Phase 5D as universal repository support or a sandbox.
 
 ## Phase 5D Handoff
 
@@ -156,3 +157,31 @@ Context selection uses no new dependency or target subprocess. It accepts an ori
 `EnvironmentProvisioner` reserves a fresh workspace outside the original repository, copies only bounded regular files, and never follows symlinks. Copy limits are 20,000 files, 32 MiB per file, and 512 MiB total. It persists original and copied relative-path SHA-256 manifests and requires equality before installation; it rechecks the original manifest after success or failure. It creates a target venv with the selected interpreter, uses uv with argv lists, no shell, no automatic Python downloads, no build from source, and per-command timeouts, then verifies `pytest==8.4.2`, `coverage==7.16.0`, and `pytest-timeout==2.4.0` separately from target dependencies. The target project is never installed or imported. The workspace contains profile/plan/result JSON, `source/`, `.venv/`, and command argv/stdout/stderr/status/duration artifacts. The copy and venv protect experiment reproducibility and the original checkout by convention; they are not a hostile-code sandbox.
 
 Phase 5B validation and the real local provisioning result are recorded in `docs/phase_reports/phase-5b.md`. The offline smoke attempt failed because the uv cache lacked runner wheels; a subsequent normal provisioning run succeeded with `READY`, verified manifests, unchanged source, and exact runner versions. No Python dependency or `uv.lock` change was made. Phase 5D now consumes prepared environments only in repository-run mode.
+
+## Phase 6 Handoff
+
+`experiment.py` parses versioned JSON manifests, validates stable IDs and canonical configuration
+semantics, statically preflights targets, and expands deterministic 1-based run specs. The four
+groups are `direct`, `execution`, `coverage`, and `mutation`; optional final mutation evaluation
+is separate from mutation feedback. `experiment_runner.py` invokes the frozen repository runner
+once per logical cell, sequentially, with a fresh target environment. It writes atomic run records
+and checkpoints, verifies manifest/plan/profile identity on resume, and exports flat JSON/CSV
+records, grouped descriptive aggregates, failure accounting, and summary. Metric schema 1 and
+missing-value behavior are defined in `docs/PHASE6_METRICS.md`. The CLI adds exclusive
+`--validate-experiment`, `--run-experiment`, and `--resume-experiment` modes. An offline 16-cell
+fixture matrix demonstrates checkpointing and resume; live mini-experiment evidence belongs in
+`docs/phase_reports/phase-6.md`. The framework has no environment cache, parallel execution,
+benchmark cloning, significance testing, or hostile-code containment. Each fresh environment and
+mutation workspace increases disk use. Current validation: frozen `uv sync`, Ruff format/lint,
+and **315 passed, 6 skipped, 3 deselected** after the additive WSL portability maintenance.
+The mutation backend resolves its effective WSL registration once: explicit CLI value, then
+`AUTOTEST_MUTATION_WSL_DISTRO`, then the historical `Ubuntu-22.04` default. This host uses
+`Ubuntu` without changing the experiment manifest or identity hashes. The real repository
+integration and Phase 6 mutation cell completed with 6 applicable mutants killed, 0 survived,
+5 other/unreported of 11 raw, score 100%, and verified source/test integrity. The first live
+mini-run's name mismatch remains historical evidence. A WSL 1 `E:` run exposed a separate copy
+permission error; a Windows Temp run verified mutation but had an unrelated coverage-cell Ollama
+120-second timeout. After conversion to WSL 2, the same manifest and plan completed all four
+cells on `E:`; mutation was `COMPLETE` with raw 11, applicable 6, killed 6, survived 0,
+other/unreported 5, score 100%, and source/test integrity true. The WSL 1 permission error did
+not reproduce. Details are in `docs/phase_reports/phase-6.md`.

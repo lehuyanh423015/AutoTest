@@ -103,12 +103,16 @@ def test_repository_cli_invalid_and_exclusive(args):
     assert result == 2
 
 
-def test_repository_cli_routes_options_without_eager_provider(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("distro", [None, "Ubuntu"])
+def test_repository_cli_routes_options_without_eager_provider(
+    monkeypatch, tmp_path, capsys, distro
+):
     seen = {}
 
     class FakeEngine:
-        def __init__(self, factory):
+        def __init__(self, factory, **kwargs):
             seen["factory"] = factory
+            seen["constructor_options"] = kwargs
 
         def run(self, root, target, options):
             seen["root"] = root
@@ -143,6 +147,7 @@ def test_repository_cli_routes_options_without_eager_provider(monkeypatch, tmp_p
                 "0",
                 "--repository-output-root",
                 str(tmp_path),
+                *(["--mutation-wsl-distribution", distro] if distro else []),
             ]
         )
         == 0
@@ -151,4 +156,5 @@ def test_repository_cli_routes_options_without_eager_provider(monkeypatch, tmp_p
     assert seen["options"].context_policy.max_dependency_depth == 1
     assert seen["options"].max_coverage_rounds == 0
     assert seen["options"].output_root == tmp_path
+    assert seen["constructor_options"] == ({"mutation_distro": distro} if distro else {})
     assert "Context: COMPLETE" in capsys.readouterr().out

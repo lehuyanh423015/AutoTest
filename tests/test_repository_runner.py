@@ -15,6 +15,7 @@ from autotest.context_selector import ContextSelector, ContextTarget
 from autotest.environment_provisioner import EnvironmentProvisioner, EnvironmentProvisionStatus
 from autotest.llm.ollama_provider import OllamaConfig, OllamaProvider
 from autotest.mutation_runner import (
+    DEFAULT_MUTATION_VENV,
     MutantOutcome,
     MutationResult,
     MutationStatus,
@@ -364,6 +365,31 @@ def test_fake_repository_mutation_and_feedback(tmp_path):
     assert result.mutation_score_initial == result.mutation_score_final == 100.0
     assert backend.calls == 1
     assert (result.run_directory / "mutation/mutation_result.json").is_file()
+
+
+def test_repository_mutation_adapter_receives_distro_override(tmp_path, monkeypatch):
+    seen = {}
+
+    class CapturingBackend(_FakeMutationBackend):
+        def __init__(self, source_root, profile, **kwargs):
+            super().__init__()
+            seen.update(kwargs)
+
+    monkeypatch.setattr("autotest.repository_runner.RepositoryWSLMutmutBackend", CapturingBackend)
+    provider = _ScriptedProvider(
+        [
+            "from demo.pricing import calculate_total\n"
+            "def test_low(): assert calculate_total(5) == 5\n"
+        ]
+    )
+    result = RepositoryRunEngine(
+        lambda: provider,
+        provisioner=_CopiedProvisioner(),
+        mutation_distro="Ubuntu",
+    ).run(FIXTURE, TARGET, _options(tmp_path, mutation=True, max_coverage_rounds=0))
+    assert result.exit_code == 0, result.error_message
+    assert seen["distro"] == "Ubuntu"
+    assert seen["mutation_venv"] == DEFAULT_MUTATION_VENV
 
 
 class _ImprovingMutationBackend:

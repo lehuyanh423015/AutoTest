@@ -352,12 +352,14 @@ class RepositoryRunEngine:
         selector: ContextSelector | None = None,
         provisioner: EnvironmentProvisioner | None = None,
         mutation_backend_factory: Callable[..., Any] | None = None,
+        mutation_distro: str | None = None,
     ) -> None:
         self.provider_factory = provider_factory
         self.inspector = inspector or ProjectInspector()
         self.selector = selector or ContextSelector()
         self.provisioner = provisioner
         self.mutation_backend_factory = mutation_backend_factory
+        self.mutation_distro = mutation_distro
 
     def run(
         self,
@@ -590,6 +592,7 @@ class RepositoryRunEngine:
                             profile,
                             timeout=options.mutation_timeout,
                             mutation_venv=options.mutation_venv,
+                            distro=self.mutation_distro,
                         )
                     )
                     mutation_artifacts = store.create_mutation(run)

@@ -725,6 +725,7 @@ class ArtifactStore:
             "python_version": result.python_version,
             "pytest_version": result.pytest_version,
             "mutation_venv": result.mutation_venv,
+            "wsl_distribution": result.wsl_distribution,
             "raw_stats_file": (
                 result.raw_stats_file.name if result.raw_stats_file is not None else None
             ),

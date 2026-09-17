@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "experiment_name": "phase6-live-mini",
+  "repetitions": 1,
+  "model": "qwen2.5-coder:14b",
+  "temperature": 0.0,
+  "evaluate_mutation": false,
+  "fail_fast": false,
+  "max_repair_attempts": 1,
+  "max_coverage_rounds": 1,
+  "max_mutation_rounds": 1,
+  "mutation_timeout": 60,
+  "repositories": [{
+    "id": "repository_pilot",
+    "path": "../tests/fixtures/projects/repository_pilot",
+    "targets": [{"id": "calculate_total", "target": "src/demo/pricing.py:calculate_total"}]
+  }],
+  "configurations": ["direct", "execution", "coverage", "mutation"]
+}

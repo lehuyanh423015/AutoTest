@@ -29,6 +29,8 @@ from autotest.environment_planner import (
 )
 from autotest.environment_provisioner import EnvironmentProvisioner, TargetEnvironment
 from autotest.errors import AutoTestError
+from autotest.experiment import ExperimentError, load_definition, plan_experiment
+from autotest.experiment_runner import ExperimentRunner
 from autotest.llm.ollama_provider import OllamaConfig, OllamaProvider
 from autotest.mutation_feedback import (
     MutationFeedbackEngine,
@@ -112,6 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--select-context", type=Path, help="Statically select target context")
     parser.add_argument("--run-project", type=Path, help="Run the repository-scale pilot")
+    parser.add_argument("--validate-experiment", type=Path, help="Validate a benchmark manifest")
+    parser.add_argument("--run-experiment", type=Path, help="Run a benchmark manifest")
+    parser.add_argument("--resume-experiment", type=Path, help="Resume an experiment directory")
+    parser.add_argument(
+        "--experiment-output-root", type=Path, default=Path("workspace/experiments")
+    )
     parser.add_argument("--project-target", help="Project-relative Python file:function")
     parser.add_argument(
         "--repository-output-root", type=Path, default=Path("workspace/repository_runs")
@@ -207,6 +215,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--mutation-venv",
         default=DEFAULT_MUTATION_VENV,
         help="Absolute path to the isolated virtualenv inside WSL",
+    )
+    parser.add_argument(
+        "--mutation-wsl-distribution",
+        help="WSL distribution for Mutmut (default: AUTOTEST_MUTATION_WSL_DISTRO or Ubuntu-22.04)",
     )
     parser.add_argument("--debug", action="store_true", help="Show debug logging and tracebacks")
     return parser
@@ -422,6 +434,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.prepare_environment,
         args.select_context,
         args.run_project,
+        args.validate_experiment,
+        args.run_experiment,
+        args.resume_experiment,
     ]
     if sum(mode is not None for mode in static_modes) > 1:
         parser.error("Inspection, environment, and context-selection modes are exclusive")
@@ -435,6 +450,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         or args.prepare_environment is not None
         or args.select_context is not None
         or args.run_project is not None
+        or args.validate_experiment is not None
+        or args.run_experiment is not None
+        or args.resume_experiment is not None
     ):
         if args.file is not None or args.function is not None:
             parser.error("Static modes cannot be combined with --file or --function")
@@ -460,8 +478,69 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+    mutation_engine_options = (
+        {"mutation_distro": args.mutation_wsl_distribution}
+        if args.mutation_wsl_distribution
+        else {}
+    )
 
     try:
+        if args.validate_experiment is not None:
+            definition = load_definition(args.validate_experiment)
+            plan = plan_experiment(definition)
+            unsupported = sum(spec.support_status == "UNSUPPORTED" for spec in plan.specs)
+            print(f"Experiment: {definition.experiment_name}")
+            print(f"Planned runs: {len(plan.specs)}")
+            print(f"Unsupported runs: {unsupported}")
+            for spec in plan.specs:
+                if spec.support_status == "UNSUPPORTED":
+                    print(f"{spec.run_id}: UNSUPPORTED: {spec.support_reason}")
+            return 0
+        if args.run_experiment is not None or args.resume_experiment is not None:
+            runner = ExperimentRunner(
+                lambda spec: RepositoryRunEngine(
+                    lambda: OllamaProvider(
+                        OllamaConfig(
+                            base_url=args.ollama_url,
+                            model=spec.model,
+                            timeout=args.ollama_timeout,
+                            temperature=spec.temperature,
+                        )
+                    ),
+                    **mutation_engine_options,
+                )
+            )
+            if args.run_experiment is not None:
+                definition = load_definition(args.run_experiment)
+                result = runner.run(
+                    definition, args.experiment_output_root, manifest=args.run_experiment
+                )
+            else:
+                result = runner.resume(args.resume_experiment)
+            summary = json.loads((result.directory / "summary.json").read_text(encoding="utf-8"))
+            print("Experiment complete" if result.complete else "Experiment incomplete")
+            print(
+                f"Planned: {summary['planned_runs']}  Completed: {summary['completed_runs']}  "
+                f"Unsupported: {summary['unsupported_runs']}  "
+                f"Errors: {summary['pipeline_failures']}  Timeouts: {summary['timeouts']}"
+            )
+            for config, group in summary["primary_aggregate"].items():
+
+                def display(value: float | None) -> str:
+                    return "N/A" if value is None else f"{value:.1f}"
+
+                final_pass = group["final_pass"]["rate"]
+                line = group["metrics"]["final_line_coverage"]["mean"]
+                mutation = group["metrics"]["final_mutation_score"]["mean"]
+                calls = group["metrics"]["llm_calls_total"]["mean"]
+                pass_text = "N/A" if final_pass is None else f"{final_pass * 100:.1f}%"
+                print(
+                    f"{config.upper()}: PASS {pass_text}, line {display(line)}%, "
+                    f"mutation {display(mutation)}%, mean LLM calls {display(calls)}"
+                )
+            print(f"Experiment artifacts: {result.directory}")
+            print(f"Recorded: {len(result.records)} / {len(result.plan.specs)}")
+            return 0 if result.complete else 2
         if args.run_project is not None:
             target = ContextTarget.parse(args.project_target)
             options = RepositoryRunOptions(
@@ -495,7 +574,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         timeout=args.ollama_timeout,
                         temperature=args.temperature,
                     )
-                )
+                ),
+                **mutation_engine_options,
             ).run(args.run_project, target, options)
             print(f"Project: {result.project_name or 'unknown'}")
             print(f"Target: {target.file.as_posix()}:{target.function}")
@@ -650,6 +730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             mutation_backend = WSLMutmutBackend(
                 timeout=args.mutation_timeout,
                 mutation_venv=args.mutation_venv,
+                distro=args.mutation_wsl_distribution,
             )
             mutation_result = mutation_backend.run(
                 function,
@@ -739,7 +820,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             return 2
         return _exit_code(session.attempts[-1].run_result)
-    except (AutoTestError, ContextSelectionError, RepositoryRunError, OSError) as exc:
+    except (
+        AutoTestError,
+        ContextSelectionError,
+        RepositoryRunError,
+        ExperimentError,
+        OSError,
+    ) as exc:
         LOGGER.error("%s", exc, exc_info=args.debug)
         return 2
 
