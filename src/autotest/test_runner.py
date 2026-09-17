@@ -12,6 +12,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from autotest.errors import TestExecutionError
+from autotest.repository_execution import RepositoryExecutionContext
 
 
 class TestStatus(StrEnum):
@@ -42,10 +43,13 @@ class TestRunResult:
 class TestRunner:
     """Run generated tests outside the AutoTest interpreter process."""
 
-    def __init__(self, timeout: float = 30.0) -> None:
+    def __init__(
+        self, timeout: float = 30.0, *, execution_context: RepositoryExecutionContext | None = None
+    ) -> None:
         if timeout <= 0:
             raise TestExecutionError("Test timeout must be greater than zero.")
         self.timeout = timeout
+        self.execution_context = execution_context
 
     def run(self, test_file: Path | str, project_root: Path | str) -> TestRunResult:
         """Run one test file using the frozen Phase 2 interface."""
@@ -68,18 +72,28 @@ class TestRunner:
         if not root.is_dir():
             raise TestExecutionError(f"Target project directory does not exist: {root}")
 
-        environment = os.environ.copy()
-        existing_pythonpath = environment.get("PYTHONPATH")
-        environment["PYTHONPATH"] = (
-            str(root)
-            if not existing_pythonpath
-            else os.pathsep.join((str(root), existing_pythonpath))
-        )
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        if self.execution_context is None:
+            environment = os.environ.copy()
+            existing_pythonpath = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = (
+                str(root)
+                if not existing_pythonpath
+                else os.pathsep.join((str(root), existing_pythonpath))
+            )
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            python = sys.executable
+            config_args: list[str] = []
+            cwd = test_path.parent
+        else:
+            environment = self.execution_context.environment()
+            python = str(self.execution_context.python_executable)
+            config_args = ["-c", str(self.execution_context.pytest_config)]
+            cwd = self.execution_context.working_directory
         command = [
-            sys.executable,
+            python,
             "-m",
             "pytest",
+            *config_args,
             "--rootdir",
             str(test_path.parent),
             "--import-mode=importlib",
@@ -93,7 +107,7 @@ class TestRunner:
         try:
             completed = subprocess.run(
                 command,
-                cwd=test_path.parent,
+                cwd=cwd,
                 env=environment,
                 capture_output=True,
                 text=True,

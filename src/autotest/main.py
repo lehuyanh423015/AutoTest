@@ -44,6 +44,11 @@ from autotest.mutation_runner import (
 from autotest.project_analyzer import ProjectAnalyzer
 from autotest.project_inspector import ProjectInspector, ProjectProfile
 from autotest.repair_engine import RepairEngine, RepairSessionResult
+from autotest.repository_runner import (
+    RepositoryRunEngine,
+    RepositoryRunError,
+    RepositoryRunOptions,
+)
 from autotest.test_runner import TestRunner, TestRunResult, TestStatus
 
 LOGGER = logging.getLogger(__name__)
@@ -106,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--prepare-environment", type=Path, help="Provision a copied target environment"
     )
     parser.add_argument("--select-context", type=Path, help="Statically select target context")
+    parser.add_argument("--run-project", type=Path, help="Run the repository-scale pilot")
+    parser.add_argument("--project-target", help="Project-relative Python file:function")
+    parser.add_argument(
+        "--repository-output-root", type=Path, default=Path("workspace/repository_runs")
+    )
     parser.add_argument("--context-target", help="Project-relative Python file:function")
     parser.add_argument(
         "--context-output-root", type=Path, default=Path("workspace/context_bundles")
@@ -411,6 +421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.plan_environment,
         args.prepare_environment,
         args.select_context,
+        args.run_project,
     ]
     if sum(mode is not None for mode in static_modes) > 1:
         parser.error("Inspection, environment, and context-selection modes are exclusive")
@@ -423,6 +434,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.plan_environment is not None
         or args.prepare_environment is not None
         or args.select_context is not None
+        or args.run_project is not None
     ):
         if args.file is not None or args.function is not None:
             parser.error("Static modes cannot be combined with --file or --function")
@@ -435,6 +447,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("Environment options require --plan-environment or --prepare-environment")
     if args.select_context is None and args.context_target is not None:
         parser.error("--context-target requires --select-context")
+    if args.run_project is None and args.project_target is not None:
+        parser.error("--project-target requires --run-project")
+    if args.run_project is not None and args.project_target is None:
+        parser.error("--project-target is required with --run-project")
     if args.select_context is not None:
         if args.context_target is None:
             parser.error("--context-target is required with --select-context")
@@ -446,6 +462,59 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     try:
+        if args.run_project is not None:
+            target = ContextTarget.parse(args.project_target)
+            options = RepositoryRunOptions(
+                output_root=args.repository_output_root,
+                environment_output_root=args.environment_output_root,
+                target_python=args.target_python,
+                environment_offline=args.environment_offline,
+                environment_timeout=args.environment_timeout,
+                test_timeout=args.timeout,
+                max_repair_attempts=args.max_repair_attempts,
+                max_coverage_rounds=args.max_coverage_rounds,
+                coverage_target=args.coverage_target,
+                context_policy=ContextSelectionPolicy(
+                    args.context_max_chars,
+                    args.context_max_files,
+                    args.context_max_items,
+                    args.context_max_depth,
+                ),
+                mutation=args.mutation,
+                mutation_feedback=args.mutation_feedback,
+                mutation_timeout=args.mutation_timeout,
+                mutation_venv=args.mutation_venv,
+                max_mutation_rounds=args.max_mutation_rounds,
+                max_mutants_per_round=args.max_mutants_per_round,
+            )
+            result = RepositoryRunEngine(
+                lambda: OllamaProvider(
+                    OllamaConfig(
+                        base_url=args.ollama_url,
+                        model=args.model,
+                        timeout=args.ollama_timeout,
+                        temperature=args.temperature,
+                    )
+                )
+            ).run(args.run_project, target, options)
+            print(f"Project: {result.project_name or 'unknown'}")
+            print(f"Target: {target.file.as_posix()}:{target.function}")
+            print(f"Module: {result.module_name or 'unresolved'}")
+            print(f"Context: {result.context_status or 'not selected'}")
+            print(f"Environment: {result.environment_status or 'not prepared'}")
+            print(f"Execution: {result.final_execution_status or 'not run'}")
+            coverage_text = (
+                result.final_line_coverage if result.final_line_coverage is not None else "N/A"
+            )
+            print(f"Coverage: {coverage_text}")
+            print(f"Mutation: {'requested' if result.mutation_enabled else 'disabled'}")
+            integrity_text = "UNCHANGED" if result.source_integrity_verified else "NOT VERIFIED"
+            print(f"Original repository: {integrity_text}")
+            print(f"Stop reason: {result.stop_reason}")
+            print(f"Result: {result.run_directory / 'result.json'}")
+            if result.error_message:
+                print(f"Error: {result.error_message}")
+            return result.exit_code
         if args.select_context is not None:
             profile = ProjectInspector().inspect(args.select_context)
             target = ContextTarget.parse(args.context_target)
@@ -670,7 +739,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             return 2
         return _exit_code(session.attempts[-1].run_result)
-    except (AutoTestError, ContextSelectionError, OSError) as exc:
+    except (AutoTestError, ContextSelectionError, RepositoryRunError, OSError) as exc:
         LOGGER.error("%s", exc, exc_info=args.debug)
         return 2
 

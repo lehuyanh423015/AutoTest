@@ -2,11 +2,11 @@
 
 ## Project Objective
 
-AutoTest is a research prototype that generates pytest tests for one named top-level Python function in one standalone `.py` file, then records execution, target-function coverage, and optional mutation evidence. It also statically profiles local Python repositories for future phases. The repository is the source of truth; Phase 1 and 1.1 reports are absent.
+AutoTest is a research prototype that generates pytest tests for one named top-level Python function in a standalone file or a controlled local-repository pilot, then records execution, target-function coverage, and optional mutation evidence. The repository is the source of truth; Phase 1 and 1.1 reports are absent.
 
 ## Current Milestone
 
-Phase 5C static cross-file context selection is implemented for review. The latest frozen milestone is Phase 5B at tag `phase-5b-frozen` (commit `3323058`). Earlier frozen tags include `phase-5a-frozen`, `phase-4b-frozen`, `phase-4a-frozen`, `phase-3-frozen`, `phase-2-frozen`, and `environment-v1.0`. Phase 5C is separate from unchanged generation, inspection, and environment modes.
+Phase 5D repository-scale pilot is implemented for review. The latest frozen milestone is Phase 5C at tag `phase-5c-frozen` (commit `43d7369`). Earlier frozen tags include `phase-5b-frozen`, `phase-5a-frozen`, `phase-4b-frozen`, `phase-4a-frozen`, `phase-3-frozen`, `phase-2-frozen`, and `environment-v1.0`. Phase 5D is uncommitted and untagged; previous CLI modes remain separate.
 
 ## Implemented Phases
 
@@ -18,6 +18,7 @@ Phase 5C static cross-file context selection is implemented for review. The late
 - Phase 5A: separate static local-project inspection, structured `ProjectProfile`, deterministic JSON, and `--inspect-project` CLI mode. It does not prepare or execute target environments.
 - Phase 5B: deterministic `EnvironmentPlan`, conservative interpreter/dependency policy, fresh copied target workspace, bounded manifests, target venv, pinned runner tooling, and verification. It does not generate tests or execute target code.
 - Phase 5C: `ProjectProfile` plus one project-relative top-level function becomes a portable `ContextBundle` with exact source items, static dependency edges, hashes, unresolved/external evidence, and budget omissions. It does not generate or run tests.
+- Phase 5D: `RepositoryRunEngine` joins that profile and context to a verified Phase 5B copy, target-venv pytest/coverage, repository prompts, bounded repair and supplementary tests, optional WSL mutation, integrity checks, and a root `RepositoryRunResult`.
 
 ## Current Pipeline
 
@@ -26,6 +27,8 @@ Phase 5C static cross-file context selection is implemented for review. The late
 Separately, `ProjectInspector` takes a local directory, statically reads known metadata/dependency files, discovers source/test roots and Python modules, parses top-level declarations with AST, and returns `ProjectProfile`. Inspection mode makes no Ollama call, target import, test subprocess, or dependency installation. Optional JSON output is independent of the Phase 1–4B run-artifact schema.
 
 `ContextSelector` consumes that profile and one project-relative top-level function. It statically indexes profiled production modules, selects exact declaration-sized source evidence and relevant imports through bounded local dependencies, and records external, unresolved, and omitted evidence. It does not import target code, require the Phase 5B environment, or call PromptBuilder. This is a target-centered static graph, not a whole-program call graph.
+
+`RepositoryRunEngine` consumes the original `ProjectProfile` and one `ContextTarget`, verifies an unambiguous importable module, selects and hashes a `ContextBundle`, plans and provisions a fresh target environment, and verifies all identities before any model call. `RepositoryPromptBuilder` adds portable source evidence to frozen prompt variants. Generated tests run with the prepared venv's Python against copied source roots and explicit test paths under a minimal pytest config. Phase 2 repair, Phase 3 coverage, and optional Phase 4A/4B mutation loops are reused. Copied source and accepted-test manifests are checked around subprocesses; the original checkout is rechecked at the end. This is a controlled pilot, not a hostile-code sandbox.
 
 ## Core Architecture
 
@@ -36,6 +39,8 @@ Separately, `ProjectInspector` takes a local directory, statically reads known m
 | Static context selection | `context_selector.py`: `ContextSelector`, `ContextTarget`, `ContextSelectionPolicy`, immutable `ContextBundle`, exact source items and edges |
 | Environment planning | `environment_planner.py`: `InterpreterInfo`, immutable `EnvironmentPlan`, compatibility and dependency policy, `EnvironmentPlanner` |
 | Environment provisioning | `environment_provisioner.py`: `EnvironmentProvisioner`, safe copy manifests, bounded argv command runner, `TargetEnvironment` |
+| Repository pilot | `repository_runner.py`: `RepositoryRunEngine`, `RepositoryRunOptions`, `RepositoryRunResult`; `repository_execution.py`: target-venv subprocess context and minimal pytest config |
+| Repository prompts and mutation | `repository_prompts.py`: verified `ContextBundle` evidence; `repository_mutation.py`: local support-module staging for selected Mutmut target |
 | Prompts and LLM | `prompt_builder.py`: `PromptBuilder`; `llm/base.py`: `LLMProvider`; `llm/ollama_provider.py`: `OllamaProvider` |
 | Generation and execution | `test_generator.py`: `TestGenerator`, `sanitize_test_code`; `test_runner.py`: `TestRunner` |
 | Feedback and repair | `failure_analyzer.py`: `FailureAnalyzer`; `test_quality.py`: AST diagnostics; `repair_engine.py`: `RepairEngine` |
@@ -53,11 +58,11 @@ Separately, `ProjectInspector` takes a local directory, statically reads known m
 
 ## Environment Baseline
 
-Repository pins CPython `3.12.10` (`.python-version`, `requires-python >=3.12,<3.13`), pytest `8.4.2`, pytest-cov `7.1.0`, coverage.py `7.16.0`, pytest-timeout `2.4.0`, Ruff `0.16.6`, and psutil `7.2.2`; `uv.lock` SHA-256 is `474378DFF8B726C8AF35C97E3CE7518F4240BFD1A28542B76736ACA55B4901B7`. The intended README baseline says Windows 11 x64, uv, Ollama at `http://localhost:11434`, and `qwen2.5-coder:14b` with temperature 0 and 120-second HTTP timeout. This audit PC reports Windows 10 Pro x64 (10.0.19045), while the test interpreter is Python 3.12.10. The Ollama endpoint responded and listed the expected model; live generation was not run.
+Repository pins CPython `3.12.10` (`.python-version`, `requires-python >=3.12,<3.13`), pytest `8.4.2`, pytest-cov `7.1.0`, coverage.py `7.16.0`, pytest-timeout `2.4.0`, Ruff `0.16.6`, and psutil `7.2.2`; `uv.lock` SHA-256 is `474378DFF8B726C8AF35C97E3CE7518F4240BFD1A28542B76736ACA55B4901B7`. The intended baseline uses Windows x64, uv, Ollama at `http://localhost:11434`, and `qwen2.5-coder:14b` with temperature 0 and a 120-second HTTP timeout. Phase 5D ran live local Ollama generation and target-venv pytest/coverage on this Windows host.
 
 ## External Mutation Environment
 
-`tools/mutation/requirements-mutation.txt` pins Mutmut `3.7.0` and pytest `8.4.2`; neither Mutmut nor its dependencies are in the main lockfile. The backend defaults to WSL distribution name `Ubuntu-22.04`, venv `/home/ubuntu/autotest-mutation-env`, and a 300-second outer timeout. This PC instead lists WSL distribution `Ubuntu` (Ubuntu 22.04.1 LTS); that venv reports Python `3.10.12`, pytest `8.4.2`, and Mutmut `3.7.0`. A direct probe of `Ubuntu-22.04` fails because the named distribution does not exist, so default-backend mutation and mutation-feedback integrations are **NOT VERIFIED ON THIS MACHINE**. The separate setup README also contains a historical `/mnt/e/University/...` requirements path; this checkout is `E:\Dev\AutoTest`.
+`tools/mutation/requirements-mutation.txt` pins Mutmut `3.7.0` and pytest `8.4.2`; neither Mutmut nor its dependencies are in the main lockfile. The backend defaults to WSL distribution `Ubuntu-22.04`, venv `/home/ubuntu/autotest-mutation-env`, and a 300-second outer timeout. On this Phase 5D host, the distribution and isolated venv were verified with Python `3.10.12`, pytest `8.4.2`, and Mutmut `3.7.0`; a real repository-target WSL mutation run completed. The separate setup README contains a historical absolute checkout path.
 
 ## CLI Capabilities
 
@@ -68,6 +73,8 @@ Repository pins CPython `3.12.10` (`.python-version`, `requires-python >=3.12,<3
 `--plan-environment <directory>` inspects and plans without workspace creation, installation, network, or target execution. `--prepare-environment <directory>` provisions a fresh environment. Both accept `--target-python <path>` and `--environment-offline`; preparation also uses `--environment-output-root` (default `workspace/target_environments`) and `--environment-timeout` (default 600 seconds per command). A supported or unsupported plan exits 0; preparation exits 0 only for `READY`, otherwise 2. Frozen generation and inspection exit contracts are unchanged.
 
 `--select-context <directory> --context-target <relative-file.py>:<function>` performs static selection without `--file`, `--function`, Ollama, a prepared environment, or test execution. Optional `--context-output-root` defaults to `workspace/context_bundles`; policy controls are `--context-max-chars` (32,000), `--context-max-files` (8), `--context-max-items` (24), and `--context-max-depth` (2). The output root must be outside the target project. Each selection gets a fresh directory with `context_bundle.json`, deterministic `context.txt`, and separate elapsed-time `selection_metrics.json`. Complete or partial selection exits 0; invalid targets, oversized mandatory source, or infrastructure failure exits 2.
+
+`--run-project <directory> --project-target <relative-file.py>:<function>` runs the Phase 5D pilot. `--repository-output-root` defaults to `workspace/repository_runs`; target-venv, context policy, repair/coverage, Ollama, and optional mutation options use the existing controls. It is mutually exclusive with standalone generation, inspection, planning, provisioning, and context-only modes. PASS/FAIL/ERROR/TIMEOUT exit mapping remains 0/1/2/3, and repository preflight/integrity/tool errors exit 2.
 
 ## Artifact Structure
 
@@ -86,6 +93,8 @@ workspace/runs/<run-id>/
 ```
 
 Exact prompts, unsanitized model responses, generated/accepted test files, pytest output, raw coverage JSON, raw Mutmut statistics, full survivor results and selected exact diffs, and input/config hashes are the primary reproducible evidence. Normalized result files and root `result.json` summarize decisions and metrics. Partial attempt/round directories can remain after a provider or pipeline failure; no result is fabricated for absent work.
+
+Repository runs use `workspace/repository_runs/<run-id>/` with a separate copied `workspace/target_environments/<id>/`. Their root result includes profile/plan/context hashes, execution/coverage/mutation metrics, stage-specific LLM counts, timings, source and accepted-test integrity status, and relative artifact references. `context/` and `integrity/` hold portable evidence; attempt, coverage, mutation, and mutation-feedback folders retain their frozen schemas.
 
 ## Research Metrics
 
@@ -106,19 +115,19 @@ uv run pytest -m mutation tests/test_mutation_feedback_integration.py::test_live
 $env:AUTOTEST_RUN_OLLAMA_MUTATION_FEEDBACK = '1'; uv run pytest -m 'mutation and ollama' tests/test_mutation_feedback_integration.py::test_live_ollama_and_mutmut_feedback_is_transactional -v
 ```
 
-On 2026-09-16, Phase 5C validation passed: `uv sync --frozen` (12 packages checked), Ruff format (89 files) and lint, and default pytest (**269 passed, 3 skipped, 3 deselected**). The three skipped Ollama tests and three deselected mutation tests remain opt-in. The Phase 5B frozen starting baseline was 236 passed, 3 skipped, 3 deselected. Live Ollama/WSL integrations were not rerun for static Phase 5C.
+The Phase 5C frozen starting baseline was `uv sync --frozen`, Ruff format/lint, and **269 passed, 3 skipped, 3 deselected**. Phase 5D final validation and live pilot results are recorded in `docs/phase_reports/phase-5d.md`; repository live integrations remain opt-in so default tests require no Ollama or WSL.
 
 The Phase 5A development baseline started from that green suite. Phase 5A adds local fixture tests for metadata parsing, static `setup.py`, source/test roots, function discovery, safety limits, deterministic JSON, and inspection CLI isolation. Its validation result is recorded in `docs/phase_reports/phase-5a.md`.
 
 ## Known Limitations
 
-Generation scope is one standalone file and one top-level function. Phase 5C selects package context separately; it is not yet connected to generation. No method context, external specification, equivalent-mutant classification, or source repair exists. Prompt context is character bounded. PASS, coverage, and mutation score are distinct evidence, never semantic correctness proofs. Generated tests are untrusted; subprocess timeouts, venvs, and WSL workspaces are not a security sandbox.
+Generation scope is one standalone file or one supported profiled repository target and one top-level function. Phase 5D feeds selected static context into repository prompts; method context, arbitrary package re-exports, external specification, equivalent-mutant classification, and source repair remain out of scope. Prompt context is character bounded. PASS, coverage, and mutation score are distinct evidence, never semantic correctness proofs. Generated tests are untrusted; subprocess timeouts, venvs, and WSL workspaces are not a security sandbox.
 
 Phase 5A discovers dependency declarations and layout but does not resolve or install dependencies, interpret lockfile solver semantics, execute target code, select cross-file context, or run generation against a repository. Dynamic `setup.py` values remain warnings. The source scan is bounded to 2 MiB per file and 10,000 Python files by default; excluded directories and directory symlinks are not traversed.
 
 ## Important Safety Constraints
 
-Static analysis does not import target modules. AutoTest does not use `exec()`/`eval()` for generated tests; target/generated code runs through pytest/coverage subprocesses. Mutation copies target and accepted tests before Mutmut runs, with hashes checked; feedback also verifies protected originals after key stages. Accepted tests are append-only in orchestration and supplementary modules are separate. **The original source and accepted files are not OS write-protected during the initial/coverage pytest subprocesses.** A malicious generated test could modify them despite prompt constraints. Treat the source/accepted immutability rule as an orchestration contract with this enforcement limit, and use disposable isolation for untrusted targets.
+Static analysis does not import target modules. AutoTest does not use `exec()`/`eval()` for generated tests; target/generated code runs through pytest/coverage subprocesses. Mutation copies target and accepted tests before Mutmut runs, with hashes checked; feedback also verifies protected originals after key stages. Accepted tests are append-only in orchestration and supplementary modules are separate. Phase 5D verifies strict copied-source and accepted-test manifests before/after execution and the original manifest at the end. **Files are not OS write-protected during subprocesses.** A malicious generated test could modify the host before a later hash check catches it. Treat immutability as a detection contract, not prevention, and use disposable external isolation for untrusted targets.
 
 ## Git / Sync Workflow
 
@@ -126,11 +135,15 @@ Static analysis does not import target modules. AutoTest does not use `exec()`/`
 
 ## Current Technical Debt
 
-The WSL backend's distribution name is fixed in code and differs from this PC's installed alias. The mutation setup README has a stale absolute checkout path. The README's Windows 11 baseline differs from this PC. Generated-test subprocesses have no filesystem/container isolation, and accepted-file integrity is not checked throughout initial/coverage execution. Heuristic failure categories and AST oracle warnings cannot establish semantic test quality. Earlier phase reports and their counts are historical snapshots.
+The WSL backend's distribution name is fixed in code; machines with another alias require configuration/code changes. The mutation setup README has a historical absolute checkout path. Generated-test subprocesses have no filesystem/container isolation, and Phase 5D hash checks are post-hoc detection, not write prevention. Heuristic failure categories and AST oracle warnings cannot establish semantic test quality. Earlier phase reports and their counts are historical snapshots.
 
 ## Recommended Next Phase
 
-Phase 5D — Repository-Scale End-to-End Pilot: combine a verified copied environment and static ContextBundle with generation and execution, while addressing source/accepted-file integrity and containment before broad untrusted-repository trials.
+Phase 6 — Experiment and Benchmark Framework: evaluate the controlled repository pilot systematically across targets and configurations. Do not treat Phase 5D as universal repository support or a sandbox.
+
+## Phase 5D Handoff
+
+The pilot is additive. The original checkout is profiled and later hash-verified; generated tests import only the prepared copy through an explicit subprocess `PYTHONPATH`. A minimal explicit pytest config and generated-test file list exclude existing repository tests and `conftest.py`. The provider is created after successful preflight. `RepositoryRunResult` records portable input hashes, stage metrics, LLM-call categories, integrity status, and artifact references. Mutation is opt-in and currently supports dependency-free profiled local Python modules staged under WSL with local support modules; unsupported layouts stop explicitly. Live venv, Ollama, and WSL mutation trials plus the exact final regression result are in `docs/phase_reports/phase-5d.md`.
 
 ## Phase 5C Handoff
 
@@ -142,4 +155,4 @@ Context selection uses no new dependency or target subprocess. It accepts an ori
 
 `EnvironmentProvisioner` reserves a fresh workspace outside the original repository, copies only bounded regular files, and never follows symlinks. Copy limits are 20,000 files, 32 MiB per file, and 512 MiB total. It persists original and copied relative-path SHA-256 manifests and requires equality before installation; it rechecks the original manifest after success or failure. It creates a target venv with the selected interpreter, uses uv with argv lists, no shell, no automatic Python downloads, no build from source, and per-command timeouts, then verifies `pytest==8.4.2`, `coverage==7.16.0`, and `pytest-timeout==2.4.0` separately from target dependencies. The target project is never installed or imported. The workspace contains profile/plan/result JSON, `source/`, `.venv/`, and command argv/stdout/stderr/status/duration artifacts. The copy and venv protect experiment reproducibility and the original checkout by convention; they are not a hostile-code sandbox.
 
-Phase 5B validation and the real local provisioning result are recorded in `docs/phase_reports/phase-5b.md`. The offline smoke attempt failed because the uv cache lacked runner wheels; a subsequent normal provisioning run succeeded with `READY`, verified manifests, unchanged source, and exact runner versions. No Python dependency or `uv.lock` change was made. Prepared environments are not yet consumed by the generation pipeline.
+Phase 5B validation and the real local provisioning result are recorded in `docs/phase_reports/phase-5b.md`. The offline smoke attempt failed because the uv cache lacked runner wheels; a subsequent normal provisioning run succeeded with `READY`, verified manifests, unchanged source, and exact runner versions. No Python dependency or `uv.lock` change was made. Phase 5D now consumes prepared environments only in repository-run mode.

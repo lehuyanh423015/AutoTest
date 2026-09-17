@@ -1,9 +1,11 @@
-# AutoTest — Phase 5C static context and Phase 4B test generation
+# AutoTest — Phase 5D repository pilot and standalone test generation
 
 AutoTest is a research prototype that asks a local large language model to generate pytest
 tests for a selected Python function. Phase 5A adds static repository inspection; Phase 5B plans
 and prepares copied, isolated target environments without running repository tests.
 Phase 5C selects bounded, cross-file source evidence for one project function without executing it.
+Phase 5D joins inspection, planning, a verified copied environment, context, generation, repair,
+coverage, and optional mutation for a controlled repository-scale pilot.
 Phase 4B adds separately opt-in mutation-guided generation
 after the frozen generation, repair, coverage, and Phase 4A evaluation pipeline has produced a
 passing cumulative suite:
@@ -34,6 +36,12 @@ process with a configurable timeout.
   venv, installs validated dependencies and pinned runner tools, and records integrity evidence.
 - `context_selector.py` builds a target-centered static symbol/import graph and a portable
   `ContextBundle` from a Phase 5A profile; it does not use the Phase 5B environment.
+- `repository_runner.py` orchestrates the repository pilot and records `RepositoryRunResult`.
+- `repository_execution.py` confines generated-test subprocess imports to the copied source roots
+  and uses the target environment's Python with an explicit minimal pytest configuration.
+- `repository_prompts.py` adds verified, portable `ContextBundle` evidence to generation,
+  repair, coverage, and mutation-feedback prompts.
+- `repository_mutation.py` stages local support modules alongside the selected mutation target.
 - `prompt_builder.py` creates a deterministic, constrained pytest prompt.
 - `llm/base.py` defines the provider-neutral generation interface.
 - `llm/ollama_provider.py` calls Ollama's `/api/generate` REST endpoint with `urllib.request`.
@@ -192,6 +200,48 @@ environment provision**. It does not require a prepared Phase 5B environment. Th
 target-centered static evidence, not a whole-program call graph or type inference. Methods,
 nested targets, arbitrary package re-exports, dynamic imports, and external package source are
 not resolved; existing repository tests are not selected as implementation context.
+
+## Phase 5D: run one repository target
+
+The pilot accepts one statically profiled top-level function in a local project with a supported
+Phase 5B dependency plan. For example:
+
+```powershell
+uv run python -m autotest.main `
+    --run-project tests/fixtures/projects/repository_pilot `
+    --project-target src/demo/pricing.py:calculate_total `
+    --repository-output-root workspace/repository_runs `
+    --environment-output-root workspace/target_environments `
+    --max-repair-attempts 1 --max-coverage-rounds 1
+```
+
+`RepositoryRunEngine` inspects the original checkout, validates an unambiguous target module,
+selects and hashes the static context, plans and provisions a fresh copied `TargetEnvironment`,
+then verifies profile, plan, context, and source identity before invoking the provider. Prompts
+contain the target's import path and project-relative source evidence, not machine-specific
+venv paths. Initial generation and bounded repairs reuse Phase 2; supplementary coverage tests
+reuse Phase 3's cumulative, transactional acceptance. `--mutation` adds evaluation-only Mutmut;
+`--mutation-feedback` additionally opts into Phase 4B's survivor-guided acceptance when the
+repository has a supported WSL mutation layout. Mutation remains off by default and unsupported
+layouts fail explicitly before a model call.
+
+Generated tests run from the target venv against only the copied source roots. Each pytest or
+coverage invocation uses an explicit minimal config and explicit generated test paths, so
+repository tests and `conftest.py` are not collected. Target code is imported through the copied
+package layout, never the original checkout. A strict copied-source manifest is checked before
+and after execution; previously accepted generated tests are hashed and checked around later
+executions. The original repository is rechecked against its provisioning manifest. Any detected
+change stops the pipeline. These checks detect changes; they do not prevent hostile code from
+writing to the host before detection.
+
+Runs live under `workspace/repository_runs/<run-id>/`, with `result.json`, profile/plan/context
+hashes, context evidence, target-environment reference, generated attempts, coverage and optional
+mutation artifacts, per-stage LLM counts, timings, integrity manifests, and status/stop reason.
+The prepared copy and venv live separately under `workspace/target_environments/`. The pilot is
+deliberately limited to one top-level target, static context, supported Phase 5B dependencies,
+and bounded files; it is not general arbitrary-repository execution. A copied workspace, venv,
+subprocess timeouts, and hash checks are **not a hostile-code sandbox**. Run untrusted projects
+only in an external disposable VM/container. Docker/VM containment is outside Phase 5D.
 
 Install the locked project environment:
 
@@ -537,9 +587,9 @@ uv run pytest -m "mutation and ollama" `
 
 ## Current limitations
 
-Phase 4B generation supports one standalone Python file and one top-level sync or async function.
-Phase 5C can select cross-file context but does not yet feed it into generation. AutoTest does not
-prepare arbitrary repository dependencies, analyze methods, verify test
+Standalone Phase 4B generation supports one file; the Phase 5D pilot additionally supports one
+profiled repository target with selected cross-file context and a verified copied environment.
+AutoTest does not prepare arbitrary repository dependencies, analyze methods, verify test
 oracles against an external specification, automatically identify equivalent mutants, repair
 source or mutants, or provide OS/container sandboxing. Mutation requires a separately provisioned
 Ubuntu 22.04 WSL environment and currently supports only pinned Mutmut 3.7.0. Accepted-test prompt

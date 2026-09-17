@@ -14,6 +14,7 @@ from typing import Any
 
 from autotest.errors import CoverageError
 from autotest.project_analyzer import FunctionInfo
+from autotest.repository_execution import RepositoryExecutionContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,10 +37,13 @@ class CoverageResult:
 class CoverageRunner:
     """Measure cumulative pytest files with coverage.py in child processes."""
 
-    def __init__(self, timeout: float = 30.0) -> None:
+    def __init__(
+        self, timeout: float = 30.0, *, execution_context: RepositoryExecutionContext | None = None
+    ) -> None:
         if timeout <= 0:
             raise CoverageError("Coverage timeout must be greater than zero.")
         self.timeout = timeout
+        self.execution_context = execution_context
 
     def run(
         self,
@@ -72,19 +76,30 @@ class CoverageRunner:
             if path.exists():
                 raise CoverageError(f"Refusing to overwrite coverage artifact: {path}")
 
-        environment = os.environ.copy()
         target_root = function.file_path.parent.resolve()
-        existing_pythonpath = environment.get("PYTHONPATH")
-        environment["PYTHONPATH"] = (
-            str(target_root)
-            if not existing_pythonpath
-            else os.pathsep.join((str(target_root), existing_pythonpath))
-        )
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        if self.execution_context is None:
+            environment = os.environ.copy()
+            existing_pythonpath = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = (
+                str(target_root)
+                if not existing_pythonpath
+                else os.pathsep.join((str(target_root), existing_pythonpath))
+            )
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            python = sys.executable
+            source = str(target_root)
+            config_args: list[str] = []
+            cwd = directory
+        else:
+            environment = self.execution_context.environment()
+            python = str(self.execution_context.python_executable)
+            source = ",".join(str(path) for path in self.execution_context.source_roots)
+            config_args = ["-c", str(self.execution_context.pytest_config)]
+            cwd = self.execution_context.working_directory
         environment["COVERAGE_FILE"] = str(data_file)
 
         run_command = [
-            sys.executable,
+            python,
             "-m",
             "coverage",
             "run",
@@ -92,9 +107,10 @@ class CoverageRunner:
             "--data-file",
             str(data_file),
             "--source",
-            str(target_root),
+            source,
             "-m",
             "pytest",
+            *config_args,
             "--rootdir",
             str(directory),
             "--import-mode=importlib",
@@ -104,7 +120,7 @@ class CoverageRunner:
             "no:cacheprovider",
         ]
         report_command = [
-            sys.executable,
+            python,
             "-m",
             "coverage",
             "json",
@@ -118,7 +134,7 @@ class CoverageRunner:
         stdout = ""
         stderr = ""
         try:
-            measured = self._execute(run_command, directory, environment)
+            measured = self._execute(run_command, cwd, environment)
             stdout = measured.stdout
             stderr = measured.stderr
             if measured.returncode != 0:
@@ -126,7 +142,7 @@ class CoverageRunner:
                     f"Coverage pytest execution failed with exit code {measured.returncode}."
                 )
 
-            reported = self._execute(report_command, directory, environment)
+            reported = self._execute(report_command, cwd, environment)
             stdout += reported.stdout
             stderr += reported.stderr
             if reported.returncode != 0:

@@ -50,6 +50,12 @@ from autotest.repair_engine import (
     StopReason,
     TestAttempt,
 )
+from autotest.repository_execution import RepositoryExecutionContext
+from autotest.repository_runner import (
+    RepositoryRunEngine,
+    RepositoryRunOptions,
+    RepositoryRunResult,
+)
 from autotest.test_generator import GeneratedTest, TestGenerator
 from autotest.test_runner import TestRunner, TestRunResult, TestStatus
 
@@ -88,6 +94,10 @@ __all__ = [
     "PythonRequirementDeclaration",
     "RepairEngine",
     "RepairSessionResult",
+    "RepositoryExecutionContext",
+    "RepositoryRunEngine",
+    "RepositoryRunOptions",
+    "RepositoryRunResult",
     "RunArtifacts",
     "StopReason",
     "TestAttempt",
